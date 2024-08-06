@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, colorchooser, messagebox
+from tkinter import ttk, colorchooser, messagebox, font
 import asyncio
 from telegram import Update
 from telegram.ext import (
@@ -13,6 +13,7 @@ import threading
 import nest_asyncio
 import configparser
 import os
+import sys
 
 # 应用 nest_asyncio 以允许在运行的事件循环中使用嵌套事件循环
 nest_asyncio.apply()
@@ -30,6 +31,7 @@ if not os.path.exists(config_file_path):
     config['settings'] = {
         'font_size': '24',
         'font_color': 'white',
+        'font_family': 'Arial',
         'opacity': '0.8',
         'scroll_direction': 'right-to-left'
     }
@@ -52,9 +54,11 @@ class DanmakuWindow(tk.Tk):
         self.title("Telegram Danmaku")
         self.geometry("800x200")
         self.configure(bg="black")
-        self.overrideredirect(True)  # 移除窗口边框
         self.attributes("-topmost", True)  # 窗口置顶
         self.attributes('-alpha', float(config['settings']['opacity']))  # 设置透明度
+
+        # 窗口边框可调整大小
+        self.resizable(True, True)
 
         # 可拖动窗口
         self.bind('<Button-1>', self.start_move)
@@ -65,11 +69,11 @@ class DanmakuWindow(tk.Tk):
 
         # 创建标签来显示弹幕
         self.label = tk.Label(self, text="", fg=config['settings']['font_color'],
-                              bg="black", font=("Arial", int(config['settings']['font_size'])))
+                              bg="black", font=(config['settings']['font_family'], int(config['settings']['font_size'])))
         self.label.pack(fill=tk.BOTH, expand=True)
 
         # 初始位置
-        self.label_x_position = 800
+        self.label_x_position = self.winfo_width()
 
         # 启动弹幕线程
         self.update_danmaku()
@@ -87,14 +91,14 @@ class DanmakuWindow(tk.Tk):
         # 创建右键菜单
         context_menu = tk.Menu(self, tearoff=0)
         context_menu.add_command(label="配置", command=self.open_settings_window)
-        context_menu.add_command(label="退出", command=self.quit)
+        context_menu.add_command(label="退出", command=self.quit_application)
         context_menu.post(event.x_root, event.y_root)
 
     def open_settings_window(self):
         # 创建配置窗口
         settings_window = tk.Toplevel(self)
         settings_window.title("配置")
-        settings_window.geometry("400x300")
+        settings_window.geometry("400x400")
         settings_window.configure(bg="black")
 
         # 字体大小
@@ -125,12 +129,20 @@ class DanmakuWindow(tk.Tk):
         ttk.Combobox(settings_window, textvariable=scroll_direction_var, values=[
                      "right-to-left", "left-to-right", "top-to-bottom", "bottom-to-top"]).pack(anchor=tk.W, padx=10, pady=5)
 
+        # 字体系列
+        font_family_var = tk.StringVar(value=config['settings']['font_family'])
+        tk.Label(settings_window, text="字体系列:", fg="white", bg="black").pack(anchor=tk.W)
+        font_families = list(font.families())
+        font_family_combo = ttk.Combobox(settings_window, textvariable=font_family_var, values=font_families)
+        font_family_combo.pack(anchor=tk.W, padx=10, pady=5)
+
         # 保存设置按钮
         def save_settings():
             config['settings']['font_size'] = str(font_size_var.get())
             config['settings']['font_color'] = font_color_var.get()
             config['settings']['opacity'] = str(opacity_var.get())
             config['settings']['scroll_direction'] = scroll_direction_var.get()
+            config['settings']['font_family'] = font_family_var.get()
             with open(config_file_path, 'w') as configfile:
                 config.write(configfile)
             messagebox.showinfo("信息", "设置已保存。")
@@ -141,9 +153,13 @@ class DanmakuWindow(tk.Tk):
 
     def update_settings(self):
         # 更新当前窗口设置
-        self.label.config(font=("Arial", int(config['settings']['font_size'])),
+        self.label.config(font=(config['settings']['font_family'], int(config['settings']['font_size'])),
                           fg=config['settings']['font_color'])
         self.attributes('-alpha', float(config['settings']['opacity']))
+
+    def quit_application(self):
+        self.destroy()
+        sys.exit(0)  # 确保退出应用程序
 
     def update_danmaku(self):
         if messages:
@@ -152,30 +168,30 @@ class DanmakuWindow(tk.Tk):
             self.label.config(text=message)
 
             # 重置起始位置
-            self.label_x_position = 800
+            self.label_x_position = self.winfo_width()
 
         # 更新文本位置
         direction = config['settings']['scroll_direction']
         if direction == "right-to-left":
             if self.label_x_position > -self.label.winfo_width():
                 self.label_x_position -= 5
-                self.label.place(x=self.label_x_position, y=80)
+                self.label.place(x=self.label_x_position, y=self.winfo_height() // 2)
         elif direction == "left-to-right":
             if self.label_x_position < self.winfo_width():
                 self.label_x_position += 5
-                self.label.place(x=self.label_x_position, y=80)
+                self.label.place(x=self.label_x_position, y=self.winfo_height() // 2)
         elif direction == "top-to-bottom":
             if self.label.winfo_y() < self.winfo_height():
-                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2,
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) // 2,
                                  y=self.label.winfo_y() + 5)
             else:
-                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2, y=-self.label.winfo_height())
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) // 2, y=-self.label.winfo_height())
         elif direction == "bottom-to-top":
             if self.label.winfo_y() > -self.label.winfo_height():
-                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2,
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) // 2,
                                  y=self.label.winfo_y() - 5)
             else:
-                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2, y=self.winfo_height())
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) // 2, y=self.winfo_height())
 
         # 定时调用自身
         self.after(50, self.update_danmaku)
@@ -219,7 +235,7 @@ def start_asyncio_loop():
 
 if __name__ == '__main__':
     # 在独立线程中启动 Telegram 机器人事件循环
-    threading.Thread(target=start_asyncio_loop).start()
+    threading.Thread(target=start_asyncio_loop, daemon=True).start()
 
     # 运行桌面弹幕应用
     run_danmaku_app()
