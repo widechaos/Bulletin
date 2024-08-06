@@ -1,6 +1,3 @@
-当然可以！下面是一个详细的 `README.md` 示例，适用于你的 Telegram 弹幕机器人项目。这个 `README` 包含了项目介绍、安装步骤、使用说明以及常见问题等内容，可以根据你的实际需求进行调整。
-
-```markdown
 # Telegram 弹幕机器人
 
 Telegram 弹幕机器人是一个 Python 项目，允许用户通过 Telegram 发送消息，这些消息会在桌面应用程序上以弹幕的形式显示。项目使用 `Tkinter` 作为 GUI 框架，并集成了 Telegram Bot API。
