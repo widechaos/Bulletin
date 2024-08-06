@@ -10,12 +10,17 @@ from telegram.ext import (
 )
 import threading
 import nest_asyncio
+import configparser  # Import the configparser module
 
 # 应用 nest_asyncio 以允许在运行的事件循环中使用嵌套事件循环
 nest_asyncio.apply()
 
+# 读取配置文件
+config = configparser.ConfigParser()
+config.read('config.ini')
+
 # 使用你的真实机器人 API Token
-bot_token = 'YOUR_BOT_TOKEN'  # 请在此替换为正确的 Token
+bot_token = config['telegram']['bot_token']  # 从配置文件中读取 Token
 
 # 创建一个全局列表来存储消息
 messages = []
