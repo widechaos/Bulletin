@@ -1,78 +1,75 @@
 import tkinter as tk
+from tkinter import ttk, colorchooser, messagebox
 import asyncio
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 import threading
 import nest_asyncio
-import json
+import configparser
 import os
 
 # 应用 nest_asyncio 以允许在运行的事件循环中使用嵌套事件循环
 nest_asyncio.apply()
 
-# 使用你的真实机器人 API Token
-bot_token = 'YOUR_BOT_TOKEN'  # 请在此替换为正确的 Token
+# 读取配置文件
+config = configparser.ConfigParser()
 
 # 配置文件路径
-config_file = 'config.json'
+config_file_path = 'config.ini'
 
-# 默认配置
-default_config = {
-    "font_size": 24,
-    "font_color": "white",
-    "transparency": 0.8,
-    "direction": "Right to Left"
-}
+# 检查配置文件是否存在
+if not os.path.exists(config_file_path):
+    # 创建默认配置文件
+    config['telegram'] = {'bot_token': 'YOUR_TELEGRAM_BOT_TOKEN'}
+    config['settings'] = {
+        'font_size': '24',
+        'font_color': 'white',
+        'opacity': '0.8',
+        'scroll_direction': 'right-to-left'
+    }
+    with open(config_file_path, 'w') as configfile:
+        config.write(configfile)
+
+# 读取配置文件
+config.read(config_file_path)
+
+# 使用你的真实机器人 API Token
+bot_token = config['telegram']['bot_token']
 
 # 创建一个全局列表来存储消息
 messages = []
-
-
-# 读取配置文件
-def load_config():
-    if os.path.exists(config_file):
-        with open(config_file, 'r') as f:
-            return json.load(f)
-    else:
-        return default_config
-
-
-# 保存配置文件
-def save_config(config):
-    with open(config_file, 'w') as f:
-        json.dump(config, f, indent=4)
-
 
 # 弹幕窗口类
 class DanmakuWindow(tk.Tk):
     def __init__(self):
         super().__init__()
-
-        # 加载配置
-        self.config_data = load_config()
-
         self.title("Telegram Danmaku")
         self.geometry("800x200")
         self.configure(bg="black")
         self.overrideredirect(True)  # 移除窗口边框
         self.attributes("-topmost", True)  # 窗口置顶
-        self.attributes('-alpha', self.config_data['transparency'])  # 设置透明度
+        self.attributes('-alpha', float(config['settings']['opacity']))  # 设置透明度
 
-        # 允许调整窗口大小
-        self.resizable(True, True)
+        # 可拖动窗口
+        self.bind('<Button-1>', self.start_move)
+        self.bind('<B1-Motion>', self.do_move)
+
+        # 右键菜单
+        self.bind("<Button-3>", self.show_context_menu)
 
         # 创建标签来显示弹幕
-        self.label = tk.Label(self, text="", fg=self.config_data['font_color'], bg="black",
-                              font=("Arial", self.config_data['font_size']))
-        self.label.pack()
+        self.label = tk.Label(self, text="", fg=config['settings']['font_color'],
+                              bg="black", font=("Arial", int(config['settings']['font_size'])))
+        self.label.pack(fill=tk.BOTH, expand=True)
 
         # 初始位置
-        self.label_x_position = self.winfo_width()
-
-        # 添加窗口拖动功能
-        self.bind("<ButtonPress-1>", self.start_move)
-        self.bind("<B1-Motion>", self.do_move)
-        self.bind("<Button-3>", self.open_settings)  # 右键打开设置窗口
+        self.label_x_position = 800
 
         # 启动弹幕线程
         self.update_danmaku()
@@ -82,113 +79,119 @@ class DanmakuWindow(tk.Tk):
         self.y = event.y
 
     def do_move(self, event):
-        deltax = event.x - self.x
-        deltay = event.y - self.y
-        self.geometry(f"+{self.winfo_x() + deltax}+{self.winfo_y() + deltay}")
+        x = self.winfo_x() + event.x - self.x
+        y = self.winfo_y() + event.y - self.y
+        self.geometry(f"+{x}+{y}")
+
+    def show_context_menu(self, event):
+        # 创建右键菜单
+        context_menu = tk.Menu(self, tearoff=0)
+        context_menu.add_command(label="配置", command=self.open_settings_window)
+        context_menu.add_command(label="退出", command=self.quit)
+        context_menu.post(event.x_root, event.y_root)
+
+    def open_settings_window(self):
+        # 创建配置窗口
+        settings_window = tk.Toplevel(self)
+        settings_window.title("配置")
+        settings_window.geometry("400x300")
+        settings_window.configure(bg="black")
+
+        # 字体大小
+        font_size_var = tk.IntVar(value=int(config['settings']['font_size']))
+        tk.Label(settings_window, text="字体大小:", fg="white", bg="black").pack(anchor=tk.W)
+        tk.Entry(settings_window, textvariable=font_size_var, width=5).pack(anchor=tk.W, padx=10, pady=5)
+
+        # 字体颜色
+        font_color_var = tk.StringVar(value=config['settings']['font_color'])
+        tk.Label(settings_window, text="字体颜色:", fg="white", bg="black").pack(anchor=tk.W)
+
+        def choose_color():
+            color_code = colorchooser.askcolor(title="选择颜色")[1]
+            if color_code:
+                font_color_var.set(color_code)
+
+        tk.Button(settings_window, text="选择颜色", command=choose_color).pack(anchor=tk.W, padx=10, pady=5)
+
+        # 透明度
+        opacity_var = tk.DoubleVar(value=float(config['settings']['opacity']))
+        tk.Label(settings_window, text="透明度:", fg="white", bg="black").pack(anchor=tk.W)
+        tk.Scale(settings_window, variable=opacity_var, from_=0.1, to=1.0, resolution=0.1, orient=tk.HORIZONTAL,
+                 bg="black", fg="white").pack(anchor=tk.W, padx=10, pady=5)
+
+        # 滚动方向
+        scroll_direction_var = tk.StringVar(value=config['settings']['scroll_direction'])
+        tk.Label(settings_window, text="滚动方向:", fg="white", bg="black").pack(anchor=tk.W)
+        ttk.Combobox(settings_window, textvariable=scroll_direction_var, values=[
+                     "right-to-left", "left-to-right", "top-to-bottom", "bottom-to-top"]).pack(anchor=tk.W, padx=10, pady=5)
+
+        # 保存设置按钮
+        def save_settings():
+            config['settings']['font_size'] = str(font_size_var.get())
+            config['settings']['font_color'] = font_color_var.get()
+            config['settings']['opacity'] = str(opacity_var.get())
+            config['settings']['scroll_direction'] = scroll_direction_var.get()
+            with open(config_file_path, 'w') as configfile:
+                config.write(configfile)
+            messagebox.showinfo("信息", "设置已保存。")
+            self.update_settings()
+            settings_window.destroy()
+
+        tk.Button(settings_window, text="保存设置", command=save_settings).pack(anchor=tk.W, padx=10, pady=10)
+
+    def update_settings(self):
+        # 更新当前窗口设置
+        self.label.config(font=("Arial", int(config['settings']['font_size'])),
+                          fg=config['settings']['font_color'])
+        self.attributes('-alpha', float(config['settings']['opacity']))
 
     def update_danmaku(self):
         if messages:
             # 从队列中获取消息
             message = messages.pop(0)
             self.label.config(text=message)
-            self.label.update_idletasks()  # 强制更新显示
 
             # 重置起始位置
-            self.label_x_position = self.winfo_width()
+            self.label_x_position = 800
 
-        # 更新文本位置和方向
-        direction = self.config_data['direction']
-
-        if direction == "Right to Left":
-            self.label_x_position -= 5
-            self.label.place(x=self.label_x_position, y=self.winfo_height() // 2 - self.label.winfo_height() // 2)
-        elif direction == "Left to Right":
-            self.label_x_position += 5
-            self.label.place(x=self.label_x_position, y=self.winfo_height() // 2 - self.label.winfo_height() // 2)
-        elif direction == "Top to Bottom":
-            self.label.place(x=self.winfo_width() // 2 - self.label.winfo_width() // 2, y=self.label_x_position)
-            self.label_x_position += 5
-        elif direction == "Bottom to Top":
-            self.label.place(x=self.winfo_width() // 2 - self.label.winfo_width() // 2, y=self.label_x_position)
-            self.label_x_position -= 5
-
-        # 检查是否需要重置位置
-        if self.label_x_position < -self.label.winfo_width() or self.label_x_position > self.winfo_width() or self.label_x_position > self.winfo_height() or self.label_x_position < -self.label.winfo_height():
-            self.label_x_position = self.winfo_width()
+        # 更新文本位置
+        direction = config['settings']['scroll_direction']
+        if direction == "right-to-left":
+            if self.label_x_position > -self.label.winfo_width():
+                self.label_x_position -= 5
+                self.label.place(x=self.label_x_position, y=80)
+        elif direction == "left-to-right":
+            if self.label_x_position < self.winfo_width():
+                self.label_x_position += 5
+                self.label.place(x=self.label_x_position, y=80)
+        elif direction == "top-to-bottom":
+            if self.label.winfo_y() < self.winfo_height():
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2,
+                                 y=self.label.winfo_y() + 5)
+            else:
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2, y=-self.label.winfo_height())
+        elif direction == "bottom-to-top":
+            if self.label.winfo_y() > -self.label.winfo_height():
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2,
+                                 y=self.label.winfo_y() - 5)
+            else:
+                self.label.place(x=(self.winfo_width() - self.label.winfo_width()) / 2, y=self.winfo_height())
 
         # 定时调用自身
-        self.after(50, self.update_danmaku)  # 每50毫秒更新一次位置
-
-    def open_settings(self, event):
-        # 创建设置窗口
-        settings_window = tk.Toplevel(self)
-        settings_window.title("设置")
-        settings_window.geometry("300x400")
-        settings_window.configure(bg="black")
-
-        # 字体大小设置
-        tk.Label(settings_window, text="字体大小:", fg="white", bg="black").pack()
-        font_size_entry = tk.Entry(settings_window)
-        font_size_entry.insert(0, self.config_data['font_size'])
-        font_size_entry.pack()
-
-        # 字体颜色设置
-        tk.Label(settings_window, text="字体颜色:", fg="white", bg="black").pack()
-        font_color_entry = tk.Entry(settings_window)
-        font_color_entry.insert(0, self.config_data['font_color'])
-        font_color_entry.pack()
-
-        # 透明度设置
-        tk.Label(settings_window, text="透明度:", fg="white", bg="black").pack()
-        transparency_scale = tk.Scale(settings_window, from_=0.1, to=1.0, resolution=0.1, orient=tk.HORIZONTAL)
-        transparency_scale.set(self.config_data['transparency'])
-        transparency_scale.pack()
-
-        # 滚动方向设置
-        tk.Label(settings_window, text="滚动方向:", fg="white", bg="black").pack()
-        direction_var = tk.StringVar(value=self.config_data['direction'])
-        direction_options = ["Right to Left", "Left to Right", "Top to Bottom", "Bottom to Top"]
-        direction_menu = tk.OptionMenu(settings_window, direction_var, *direction_options)
-        direction_menu.pack()
-
-        # 保存按钮
-        save_button = tk.Button(settings_window, text="保存",
-                                command=lambda: self.save_settings(settings_window, font_size_entry, font_color_entry,
-                                                                   transparency_scale, direction_var))
-        save_button.pack()
-
-    def save_settings(self, window, font_size_entry, font_color_entry, transparency_scale, direction_var):
-        # 更新配置
-        self.config_data['font_size'] = int(font_size_entry.get())
-        self.config_data['font_color'] = font_color_entry.get()
-        self.config_data['transparency'] = transparency_scale.get()
-        self.config_data['direction'] = direction_var.get()
-
-        # 应用配置
-        self.label.config(font=("Arial", self.config_data['font_size']), fg=self.config_data['font_color'])
-        self.attributes('-alpha', self.config_data['transparency'])
-
-        # 保存配置
-        save_config(self.config_data)
-
-        # 关闭设置窗口
-        window.destroy()
-
+        self.after(50, self.update_danmaku)
 
 # Telegram 消息处理函数
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text('欢迎使用桌面弹幕机器人！发送任意消息以查看弹幕效果。')
-
 
 async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         message_text = update.message.text
         messages.append(message_text)
         print(f"Received message: {message_text}")  # 打印接收到的消息
-        print(f"Messages queue: {messages}")  # 打印当前消息队列
+        print(f"Messages queue: {messages}")        # 打印当前消息队列
     else:
         print("No message received.")
-
 
 async def run_telegram_bot():
     # 创建 Application 对象并传递 Token
@@ -203,19 +206,16 @@ async def run_telegram_bot():
     # 启动机器人
     await application.run_polling()
 
-
 def run_danmaku_app():
     # 运行桌面弹幕应用
     app = DanmakuWindow()
     app.mainloop()
-
 
 def start_asyncio_loop():
     # 使用现有事件循环
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_telegram_bot())
-
 
 if __name__ == '__main__':
     # 在独立线程中启动 Telegram 机器人事件循环
