@@ -1,136 +1,72 @@
-# Telegram 弹幕机器人
+# DangmuNews · 桌面弹幕新闻
 
-Telegram 弹幕机器人是一个 Python 项目，允许用户通过 Telegram 发送消息，这些消息会在桌面应用程序上以弹幕的形式显示。项目使用 `Tkinter` 作为 GUI 框架，并集成了 Telegram Bot API。
+让新闻**以弹幕的形式直接飞在你的桌面上**——透明、置顶、**鼠标穿透不挡任何程序的操作**；只有当你把指针移到某条弹幕上时它才可点：**左键打开原文，右键开设置**。
 
-## 项目功能
+新闻源用 **RSS / RSSHub**：无需任何账号或鉴权，几乎能接入任何来源（新闻站、微博热搜、知乎热榜、公众号、Hacker News…）。基于 Python + Qt（PySide6），跨平台（macOS / Windows / Linux）。
 
-- **消息弹幕**：通过 Telegram 机器人接收消息，并在桌面应用程序中滚动显示。
-- **可配置界面**：用户可以自定义弹幕字体、颜色、透明度等设置。
-- **无标题栏窗口**：提供可调整大小和拖动的无标题栏窗口。
-- **跨平台支持**：支持 Windows、MacOS 和 Linux。
+## 特性
 
-## 目录
+- **真·桌面弹幕**：不是窗口。每条弹幕是独立的透明置顶小窗，飞过整个桌面，互不影响你正常点击、操作其它程序。
+- **可交互**：指针悬停到弹幕上→它变可点，**左键跳转新闻原文**，**右键打开设置**。
+- **RSS / RSSHub 源**：`config.json` 里加 RSS 链接即可；用 [RSSHub](https://docs.rsshub.app) 可把微博/知乎/B站/公众号等变成 RSS。
+- **系统托盘控制**：暂停 / 清屏 / 设置 / 退出。
+- **多泳道并发**、可调字体/字号/颜色/速度/透明度/占屏高度。
 
-- [安装说明](#安装说明)
-- [使用方法](#使用方法)
-- [配置文件](#配置文件)
-- [常见问题](#常见问题)
-- [打包为可执行文件](#打包为可执行文件)
-- [贡献](#贡献)
-- [许可](#许可)
-
-## 安装说明
-
-### 环境要求
-
-- Python 3.7+
-- `pip` 包管理器
-
-### 安装步骤
-
-1. **克隆项目**
-
-   ```bash
-   git clone https://github.com/yourusername/danmaku-bot.git
-   cd danmaku-bot
-   ```
-
-2. **安装依赖**
-
-   使用 `pip` 安装项目所需的依赖：
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-   `requirements.txt` 文件内容示例：
-
-   ```plaintext
-   python-telegram-bot
-   nest_asyncio
-   ```
-
-3. **配置 Telegram 机器人**
-
-   - 前往 [Telegram](https://telegram.org/) 创建一个新的 Bot 并获取 API Token。
-   - 在项目根目录下创建 `config.ini` 文件，并将你的 Telegram Bot Token 填入：
-
-     ```ini
-     [telegram]
-     bot_token = YOUR_TELEGRAM_BOT_TOKEN
-
-     [settings]
-     font_size = 24
-     font_color = white
-     font_family = Arial
-     opacity = 0.8
-     scroll_direction = right-to-left
-     ```
-
-## 使用方法
-
-### 启动程序
-
-在项目目录下运行以下命令启动弹幕机器人：
+## 快速开始
 
 ```bash
+git clone https://github.com/widechaos/DangmuNews.git
+cd DangmuNews
+pip install -r requirements.txt
 python main.py
 ```
 
-### 使用 Telegram 发送弹幕
+首次运行会生成 `config.json`（含一组默认 RSS 源），弹幕随即开始飞。用**系统托盘图标**（蓝色“弹”）打开设置或退出。
 
-1. 打开 Telegram，找到你的 Bot。
-2. 发送任意文本消息至 Bot，消息将以弹幕的形式显示在桌面应用程序中。
+## 配置新闻源
 
-### 界面操作
+编辑 `config.json` 的 `feeds`（或托盘 → 设置 里改），每行一个 RSS/Atom 链接：
 
-- **移动窗口**：按住鼠标左键可以拖动窗口。
-- **调整大小**：拖动窗口边缘可调整窗口大小。
-- **右键菜单**：右键点击窗口可以打开配置菜单或退出程序。
-
-## 配置文件
-
-配置文件 `config.ini` 用于存储界面设置：
-
-- **font_size**：弹幕字体大小。
-- **font_color**：弹幕字体颜色。
-- **font_family**：弹幕字体系列。
-- **opacity**：窗口透明度（0.1 到 1.0）。
-- **scroll_direction**：弹幕滚动方向。
-
-## 常见问题
-
-### 1. 消息不显示？
-
-- 确保你已经在 `config.ini` 文件中正确配置了 Telegram Bot Token。
-- 确保机器人已启动并能够接收消息。
-
-### 2. 如何调整窗口大小？
-
-- 确保窗口边缘能够响应鼠标事件。如果调整大小功能异常，请检查代码中 `start_resize` 和 `do_resize` 方法的实现。
-
-### 3. PyInstaller 打包后的程序无法运行？
-
-- 确保所有依赖项已正确安装，并在打包时添加 `--onefile --windowed` 选项。
-- 检查是否需要手动添加 DLL 或其他动态链接库。
-
-## 打包为可执行文件
-
-### 使用 PyInstaller 打包
-
-在项目目录下运行以下命令：
-
-```bash
-pyinstaller --onefile --windowed main.py
+```json
+"feeds": [
+  "https://news.ycombinator.com/rss",
+  "https://sspai.com/feed",
+  "https://rsshub.app/zhihu/hotlist",
+  "https://rsshub.app/weibo/search/hot"
+]
 ```
 
-生成的可执行文件位于 `dist/` 目录中，直接运行该文件即可启动程序。
+> 想接**任何**没有原生 RSS 的站点？用 RSSHub（公共实例 `https://rsshub.app` 或自建），在它的路由列表里找到对应源，拿到 RSS 链接加进来即可。
 
-## 贡献
+## 操作
 
-欢迎提出问题、建议或贡献代码！请创建 Issue 或提交 Pull Request。
+- **看**：弹幕自动从右向左飞过桌面上部。
+- **点**：把指针移到某条弹幕上（会出现下划线），左键打开原文，右键打开设置。
+- **控制**：系统托盘图标 → 暂停 / 清屏 / 设置 / 退出。
+
+## 其它设置（`config.json`）
+
+| 键 | 说明 |
+|---|---|
+| `font_size` / `font_color` / `font_family` | 字号 / 颜色 / 字体（空=按平台自动） |
+| `speed` | 弹幕速度（像素/帧） |
+| `opacity` | 单条弹幕不透明度 |
+| `top_fraction` | 弹幕占屏幕高度的上部比例 |
+| `max_on_screen` | 同屏最多弹幕数 |
+| `poll_interval` | 新闻源轮询间隔（秒） |
+
+## 打包
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --windowed --name DangmuNews main.py
+```
+
+## 环境
+
+- Python 3.9+
+- 依赖：`PySide6`、`feedparser`（见 `requirements.txt`）
 
 ## 许可
 
-此项目基于 MIT 许可证发布。有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
-
+MIT，见 [LICENSE](LICENSE)。

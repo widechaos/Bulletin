@@ -1,0 +1,3 @@
+# 只需 Qt 基础模块(QtWidgets/QtCore/QtGui),无需 PySide6 全量的 Addons(省 300+MB)
+PySide6-Essentials>=6.6
+feedparser>=6.0
