@@ -16,7 +16,10 @@ build/
 dist/
 *.spec
 # 打包配置要进仓(CI 用)
-!DangmuNews.spec
+!Bulletin.spec
+
+# 图标构建中间产物(保留 svg/icns/ico/png 源与成品)
+assets/icon.iconset/
 
 # OS / editor
 .DS_Store

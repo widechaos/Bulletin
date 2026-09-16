@@ -1,10 +1,12 @@
-# DangmuNews · 桌面弹幕新闻
+# Bulletin · 弹讯
+
+> 桌面弹幕新闻 —— 让实时快讯以弹幕飞在桌面上
 
 <p align="center">
-  <a href="https://github.com/widechaos/DangmuNews/releases/latest"><img src="https://img.shields.io/github/v/release/widechaos/DangmuNews?color=7AA2F7&label=release" alt="release"></a>
+  <a href="https://github.com/widechaos/Bulletin/releases/latest"><img src="https://img.shields.io/github/v/release/widechaos/Bulletin?color=7AA2F7&label=release" alt="release"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-24283B" alt="platform">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="python">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/widechaos/DangmuNews?color=9ECE6A" alt="license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/widechaos/Bulletin?color=9ECE6A" alt="license"></a>
 </p>
 
 让新闻**以弹幕的形式直接飞在你的桌面上** —— 全透明、置顶、**鼠标穿透不挡任何程序操作**。只有当指针停在某条弹幕上时它才暂停并可点:**左键打开原文,右键 / 托盘开菜单**。
@@ -32,19 +34,19 @@
 
 ### 下载现成版本(推荐)
 
-到 [**Releases**](https://github.com/widechaos/DangmuNews/releases/latest) 下载对应平台:
+到 [**Releases**](https://github.com/widechaos/Bulletin/releases/latest) 下载对应平台:
 
 | 平台 | 文件 | 说明 |
 |------|------|------|
-| macOS | `DangmuNews-macOS.zip` | 解压得 `DangmuNews.app`,拖进「应用程序」。首次打开若拦截:右键→打开。菜单栏 agent,无 Dock 图标。 |
-| Windows | `DangmuNews-Windows.zip` | 解压运行 `DangmuNews.exe`。 |
-| Linux | `DangmuNews-Linux.tar.gz` | 解压运行 `DangmuNews/DangmuNews`。 |
+| macOS | `Bulletin-macOS.zip` | 解压得 `Bulletin.app`,拖进「应用程序」。首次打开若拦截:右键→打开。菜单栏 agent,无 Dock 图标。 |
+| Windows | `Bulletin-Windows.zip` | 解压运行 `Bulletin.exe`。 |
+| Linux | `Bulletin-Linux.tar.gz` | 解压运行 `Bulletin/Bulletin`。 |
 
 ### 从源码运行
 
 ```bash
-git clone https://github.com/widechaos/DangmuNews.git
-cd DangmuNews
+git clone https://github.com/widechaos/Bulletin.git
+cd Bulletin
 pip install -r requirements.txt
 python main.py
 ```
@@ -56,7 +58,7 @@ python main.py
 首次运行生成配置文件:
 
 - 源码运行 → 程序目录下 `config.json`
-- 打包版 → 用户目录(macOS `~/Library/Application Support/DangmuNews/`,Windows `%APPDATA%\DangmuNews\`,Linux `~/.config/DangmuNews/`)
+- 打包版 → 用户目录(macOS `~/Library/Application Support/Bulletin/`,Windows `%APPDATA%\Bulletin\`,Linux `~/.config/Bulletin/`)
 
 大部分设置在**托盘 → 设置**里图形化调整。要接入实时国内源,在设置里填 **RSSHub 基址**(你自建的实例),feeds 里的 `{rsshub}` 会自动替换成它。内置「实时·RSSHub」预设涵盖财联社电报、华尔街见闻快讯、微博热搜、知乎日报。
 
@@ -68,8 +70,8 @@ python main.py
 
 ```bash
 pip install -r requirements.txt pyinstaller
-pyinstaller DangmuNews.spec --noconfirm
-# 产物在 dist/ —— mac 为 DangmuNews.app,win/linux 为 DangmuNews/ 目录
+pyinstaller Bulletin.spec --noconfirm
+# 产物在 dist/ —— mac 为 Bulletin.app,win/linux 为 Bulletin/ 目录
 ```
 
 跨平台发布由 GitHub Actions 完成:推一个 `v*` tag(如 `git tag v0.1.0 && git push origin v0.1.0`)即自动为三大平台构建并发布到 Releases。

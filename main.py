@@ -1,4 +1,4 @@
-"""DangmuNews —— 桌面弹幕新闻(v2)
+"""Bulletin 弹讯 —— 桌面弹幕新闻
 
 RSS/RSSHub 新闻源 → 弹幕直接飞在桌面上(全透明、不挡其它程序操作),
 左键弹幕打开原文,右键弹幕或系统托盘图标开菜单/设置。
@@ -41,7 +41,7 @@ def main():
     conf = cfg.load()
 
     app = QtWidgets.QApplication(sys.argv)
-    app.setApplicationName("DangmuNews")
+    app.setApplicationName("Bulletin")
     app.setQuitOnLastWindowClosed(False)   # 无主窗口,退出走托盘菜单
     _macos_accessory_mode()
 

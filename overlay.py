@@ -18,6 +18,7 @@ import webbrowser
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+import autostart
 import config as cfg
 from danmaku import Danmu
 from sources import probe_feed, resolve_url
@@ -116,6 +117,10 @@ class OverlayWindow(QtWidgets.QWidget):
         self.hover_t = QtCore.QTimer(self)
         self.hover_t.timeout.connect(self._hover)
         self.hover_t.start(50)
+        self._fs_paused = False
+        self.fs_t = QtCore.QTimer(self)
+        self.fs_t.timeout.connect(self._check_fullscreen)
+        self.fs_t.start(2000)          # 每 2s 查一次前台是否全屏
 
         self._build_tray()
         self.show()          # 用 show()(几何已=整屏);不用 showFullScreen 以免进 macOS 全屏 Space
@@ -200,7 +205,7 @@ class OverlayWindow(QtWidgets.QWidget):
         return None
 
     def _spawn_once(self):
-        if self.paused or not self._interval_ok():
+        if self.paused or self._fs_paused or not self._interval_ok():
             return
         self._drain_queue()
         if not self.pending or len(self.danmu) >= int(self.conf["max_on_screen"]):
@@ -247,8 +252,18 @@ class OverlayWindow(QtWidgets.QWidget):
         self.danmu.append(d)
 
     # ---------- 动画 ----------
+    def _check_fullscreen(self):
+        if not self.conf.get("pause_on_fullscreen", True):
+            self._fs_paused = False
+            return
+        try:
+            import fullscreen
+            self._fs_paused = fullscreen.foreground_is_fullscreen()
+        except Exception:
+            self._fs_paused = False
+
     def _advance(self):
-        if self.paused:
+        if self.paused or self._fs_paused:      # 全屏(看视频/演示)时冻结,不打扰
             return
         dead = []
         for d in self.danmu:
@@ -399,7 +414,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self._update_url = ""
         self._update_tag = ""
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon(), self)
-        self.tray.setToolTip(f"DangmuNews v{cfg.__version__} · 桌面弹幕新闻")
+        self.tray.setToolTip(f"Bulletin 弹讯 v{cfg.__version__} · 桌面弹幕新闻")
         self.tray.setContextMenu(self._menu())
         self.tray.show()
         self.update_found.connect(self._on_update_found)
@@ -417,7 +432,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self._update_tag = tag
         self._update_url = url
         self.tray.setContextMenu(self._menu())
-        self.tray.showMessage("DangmuNews 有新版本",
+        self.tray.showMessage("Bulletin 有新版本",
                               f"{tag} 可更新 —— 托盘菜单「下载新版」", self.tray.icon(), 5000)
 
     def _open_update(self):
@@ -562,7 +577,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def __init__(self, conf: dict, sources: list | None = None):
         super().__init__()
-        self.setWindowTitle("DangmuNews 设置")
+        self.setWindowTitle("Bulletin · 弹讯设置")
         self.setMinimumWidth(880)
         self.resize(920, 664)
         self._c = conf
@@ -682,7 +697,9 @@ class SettingsDialog(QtWidgets.QDialog):
         w2, self.show_tag = self._toggle_cell("来源标签", conf.get("show_source_tag", True))
         w3, self.show_time = self._toggle_cell("显示时间", conf.get("show_time", True))
         w4, self.adaptive = self._toggle_cell("长弹幕加速", conf.get("adaptive_speed", False))
-        for i, w in enumerate((w1, w2, w3, w4)):
+        w5, self.autostart_sw = self._toggle_cell("开机自启", autostart.is_enabled())
+        w6, self.fs_pause_sw = self._toggle_cell("全屏暂停", conf.get("pause_on_fullscreen", True))
+        for i, w in enumerate((w1, w2, w3, w4, w5, w6)):
             tg.addWidget(w, i // 2, i % 2)
         self._row(g, "", tg)
 
@@ -906,6 +923,9 @@ class SettingsDialog(QtWidgets.QDialog):
         c["colorful"] = self.colorful.isChecked()
         c["outline"] = self.outline.value()
         c["adaptive_speed"] = self.adaptive.isChecked()
+        c["pause_on_fullscreen"] = self.fs_pause_sw.isChecked()
+        c["autostart"] = self.autostart_sw.isChecked()
+        autostart.set_autostart(c["autostart"])         # 立即注册/注销登录启动项
         c["only_enabled"] = self.only_enabled.isChecked()
         c["only_keywords"] = [w.strip() for w in self.only_kw.text().replace("，", ",").split(",") if w.strip()]
         if self.src_checks:

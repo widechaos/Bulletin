@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller 打包配置(跨平台)。
-mac → DangmuNews.app(菜单栏 agent,无 Dock 图标);win/linux → onedir 可执行。
-构建:pyinstaller DangmuNews.spec --noconfirm
+mac → Bulletin.app(菜单栏 agent,无 Dock 图标);win/linux → onedir 可执行。
+构建:pyinstaller Bulletin.spec --noconfirm
 """
 import sys
 
@@ -10,7 +10,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['updater'],   # updater 是函数内延迟导入,显式声明防漏
+    hiddenimports=['updater', 'fullscreen', 'autostart'],   # 延迟/间接导入,显式声明防漏
     hookspath=[],
     runtime_hooks=[],
     excludes=['tkinter', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.Qt3DCore',
@@ -24,24 +24,25 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='DangmuNews',
+    name='Bulletin',
     debug=False,
     strip=False,
     upx=True,
     console=False,
+    icon='assets/icon.ico',      # Windows 图标(mac/linux 忽略)
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True, name='DangmuNews')
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True, name='Bulletin')
 
 if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
-        name='DangmuNews.app',
-        icon=None,
-        bundle_identifier='cn.widechaos.dangmunews',
+        name='Bulletin.app',
+        icon='assets/icon.icns',
+        bundle_identifier='cn.widechaos.bulletin',
         info_plist={
             'LSUIElement': True,                    # 菜单栏 agent,不占 Dock
-            'CFBundleShortVersionString': '0.1.0',
-            'CFBundleVersion': '0.1.0',
+            'CFBundleShortVersionString': '0.1.1',
+            'CFBundleVersion': '0.1.1',
             'NSHighResolutionCapable': True,
         },
     )

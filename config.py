@@ -3,8 +3,8 @@ import json
 import os
 import sys
 
-APP_NAME = "DangmuNews"
-__version__ = "0.1.0"
+APP_NAME = "Bulletin"
+__version__ = "0.1.1"
 
 
 def _data_dir() -> str:

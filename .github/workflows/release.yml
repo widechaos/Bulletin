@@ -32,32 +32,32 @@ jobs:
         run: pip install -r requirements.txt pyinstaller
 
       - name: Build
-        run: pyinstaller DangmuNews.spec --noconfirm
+        run: pyinstaller Bulletin.spec --noconfirm
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: cd dist && zip -r ../DangmuNews-macOS.zip DangmuNews.app
+        run: cd dist && zip -r ../Bulletin-macOS.zip Bulletin.app
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: Compress-Archive -Path dist/DangmuNews/* -DestinationPath DangmuNews-Windows.zip
+        run: Compress-Archive -Path dist/Bulletin/* -DestinationPath Bulletin-Windows.zip
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: cd dist && tar czf ../DangmuNews-Linux.tar.gz DangmuNews
+        run: cd dist && tar czf ../Bulletin-Linux.tar.gz Bulletin
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DangmuNews-${{ matrix.name }}
+          name: Bulletin-${{ matrix.name }}
           path: |
-            DangmuNews-*.zip
-            DangmuNews-*.tar.gz
+            Bulletin-*.zip
+            Bulletin-*.tar.gz
 
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            DangmuNews-*.zip
-            DangmuNews-*.tar.gz
+            Bulletin-*.zip
+            Bulletin-*.tar.gz

@@ -10,7 +10,7 @@ import urllib.request
 
 from config import __version__
 
-REPO = "widechaos/DangmuNews"
+REPO = "widechaos/Bulletin"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 PAGE_LATEST = f"https://github.com/{REPO}/releases/latest"
 
