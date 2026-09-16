@@ -3,7 +3,27 @@ import json
 import os
 import sys
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+APP_NAME = "DangmuNews"
+__version__ = "0.1.0"
+
+
+def _data_dir() -> str:
+    """配置/去重文件的落地目录。
+    打包后(frozen)程序目录只读 → 写用户目录;开发时放脚本旁,沿用现有 config.json。"""
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            base = os.path.expanduser("~/Library/Application Support")
+        elif sys.platform.startswith("win"):
+            base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        else:
+            base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        d = os.path.join(base, APP_NAME)
+        os.makedirs(d, exist_ok=True)
+        return d
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+BASE = _data_dir()
 CONFIG_FILE = os.path.join(BASE, "config.json")
 SEEN_FILE = os.path.join(BASE, ".seen.json")
 

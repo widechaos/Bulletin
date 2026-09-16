@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:      # 也可手动在 Actions 页触发(仅产出构建产物,不发 release)
+
+permissions:
+  contents: write         # 允许创建/更新 Release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-latest
+            name: Linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller DangmuNews.spec --noconfirm
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: cd dist && zip -r ../DangmuNews-macOS.zip DangmuNews.app
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/DangmuNews/* -DestinationPath DangmuNews-Windows.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: cd dist && tar czf ../DangmuNews-Linux.tar.gz DangmuNews
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DangmuNews-${{ matrix.name }}
+          path: |
+            DangmuNews-*.zip
+            DangmuNews-*.tar.gz
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DangmuNews-*.zip
+            DangmuNews-*.tar.gz

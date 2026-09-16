@@ -71,6 +71,8 @@ def rel_time(ts: float) -> str:
 
 
 class OverlayWindow(QtWidgets.QWidget):
+    update_found = QtCore.Signal(str, str)   # (tag, url) 发现新版本
+
     def __init__(self, conf: dict, item_queue):
         super().__init__(
             None,
@@ -383,15 +385,44 @@ class OverlayWindow(QtWidgets.QWidget):
         m.addSeparator()
         m.addAction("设置…", self.open_settings)
         m.addSeparator()
+        if getattr(self, "_update_url", ""):
+            m.addAction(f"⬇ 下载新版 {self._update_tag} ↗", self._open_update)
+        else:
+            m.addAction("检查更新", self._check_update_async)
+        m.addAction(f"关于  v{cfg.__version__}", lambda: None).setEnabled(False)
+        m.addSeparator()
         m.addAction("退出", QtWidgets.QApplication.quit)
         return m
 
     def _build_tray(self):
         self.paused = False
+        self._update_url = ""
+        self._update_tag = ""
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon(), self)
-        self.tray.setToolTip("DangmuNews · 桌面弹幕新闻")
+        self.tray.setToolTip(f"DangmuNews v{cfg.__version__} · 桌面弹幕新闻")
         self.tray.setContextMenu(self._menu())
         self.tray.show()
+        self.update_found.connect(self._on_update_found)
+        self._check_update_async()   # 启动后台静默检查一次
+
+    def _check_update_async(self):
+        def work():
+            import updater
+            has, tag, url = updater.check_update()
+            if has:
+                self.update_found.emit(tag, url)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_found(self, tag: str, url: str):
+        self._update_tag = tag
+        self._update_url = url
+        self.tray.setContextMenu(self._menu())
+        self.tray.showMessage("DangmuNews 有新版本",
+                              f"{tag} 可更新 —— 托盘菜单「下载新版」", self.tray.icon(), 5000)
+
+    def _open_update(self):
+        if self._update_url:
+            webbrowser.open(self._update_url)
 
     def toggle_pause(self):
         self.paused = not self.paused
