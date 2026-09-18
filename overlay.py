@@ -528,7 +528,7 @@ class AreaPreview(QtWidgets.QWidget):
         super().__init__()
         self._owner = owner
         self._frac = float(frac)
-        self.setFixedHeight(52)
+        self.setFixedHeight(44)
         self.setMinimumWidth(96)
 
     def setFraction(self, f: float):
@@ -579,7 +579,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Bulletin · 弹讯设置")
         self.setMinimumWidth(880)
-        self.resize(920, 664)
+        self.resize(940, 740)   # 一屏放下:左栏加了区域预览+两个开关后更高,窗口相应加高
         self._c = conf
         self._t = THEMES.get(conf.get("theme", "Tokyo Night"), THEMES["Tokyo Night"])
         self._titles: list = []
@@ -670,8 +670,7 @@ class SettingsDialog(QtWidgets.QDialog):
         fonts = [f for f in cands if f in installed]
         if cur_font and cur_font not in fonts:
             fonts.insert(0, cur_font)
-        self.family = QtWidgets.QComboBox()
-        self.family.setEditable(True)          # 精简下拉,但仍可手输冷门字体
+        self.family = QtWidgets.QComboBox()    # 纯下拉:点一下直接出字体列表
         self.family.addItems(fonts)
         self.family.setCurrentText(cur_font)
         self._row(g, "字体", self.family)
