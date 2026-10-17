@@ -741,6 +741,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.rsshub.setPlaceholderText("自建 RSSHub 基址;feeds 里 {rsshub} 会替换成它")
         self._row(g, "RSSHub", self.rsshub)
         self.poll = self._slider_row(g, "轮询", 15, 600, int(conf["poll_interval"]), lambda v: f"{v}s")
+        self.conserve = QtWidgets.QCheckBox("日报每30分钟、热搜每10分钟（其它源按轮询间隔）")
+        self.conserve.setChecked(conf.get("conserve_bandwidth", True))
+        self._row(g, "省流", self.conserve)
 
         prow = QtWidgets.QHBoxLayout()
         plab = QtWidgets.QLabel("预设")
@@ -939,6 +942,7 @@ class SettingsDialog(QtWidgets.QDialog):
         c["rsshub_base"] = self.rsshub.text().strip() or "https://rsshub.app"
         c["mute_keywords"] = [w.strip() for w in self.mute.text().replace("，", ",").split(",") if w.strip()]
         c["poll_interval"] = self.poll.value()
+        c["conserve_bandwidth"] = self.conserve.isChecked()
         c["feeds"] = [ln.strip() for ln in self.feeds.toPlainText().splitlines() if ln.strip()]
         self.applied.emit()
         self.saved_lbl.setText("已保存 ✓")

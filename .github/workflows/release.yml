@@ -31,6 +31,9 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt pyinstaller
 
+      - name: Test
+        run: python -m unittest discover -s tests -v
+
       - name: Build
         run: pyinstaller Bulletin.spec --noconfirm
 

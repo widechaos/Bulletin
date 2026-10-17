@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import calendar
+import gzip
 import html
 import queue
 import re
@@ -17,6 +18,7 @@ import ssl
 import threading
 import time
 import urllib.request
+from urllib.error import HTTPError
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -48,13 +50,35 @@ def _host(url: str) -> str:
         return ""
 
 
-def fetch_parse(url: str, rsshub_base: str):
+def feed_interval(url: str, conf: dict) -> int:
+    interval = max(15, int(conf.get("poll_interval", 120)))
+    base = conf.get("rsshub_base", "")
+    if conf.get("conserve_bandwidth", True) and base and _host(url) == _host(base):
+        route = urlsplit(url).path.removeprefix(urlsplit(base).path.rstrip("/"))
+        interval = max(interval, {"/zhihu/daily": 1800, "/weibo/search/hot": 600}.get(route, 0))
+    return interval
+
+
+@dataclass
+class FeedValidators:
+    etag: str = ""
+    modified: str = ""
+
+
+def fetch_parse(url: str, rsshub_base: str, validators: FeedValidators | None = None):
     """抓取并解析一个 feed。对「自建 relay 主机」跳过证书校验(自签+basic auth,安全可接受),
-    并从 URL 的 user:pass@ 里取出凭据放进 Authorization 头。返回 feedparser 结果(失败抛异常)。"""
+    并从 URL 的 user:pass@ 里取出凭据放进 Authorization 头。
+    轮询可传入每个源独立的验证器；304 返回 None，失败抛异常。"""
     if feedparser is None:
         raise RuntimeError("no feedparser")
     parts = urlsplit(url)
-    headers = {"User-Agent": "DangmuNews/2 (+https://widechaos.cn)"}
+    headers = {"User-Agent": "DangmuNews/2 (+https://widechaos.cn)",
+               "Accept-Encoding": "gzip"}
+    if validators is not None:
+        if validators.etag:
+            headers["If-None-Match"] = validators.etag
+        if validators.modified:
+            headers["If-Modified-Since"] = validators.modified
     netloc = parts.netloc
     if "@" in netloc:
         userinfo, hostonly = netloc.rsplit("@", 1)
@@ -64,9 +88,28 @@ def fetch_parse(url: str, rsshub_base: str):
     insecure = bool(rsshub_base) and _host(url) == _host(rsshub_base)
     ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     req = urllib.request.Request(clean, headers=headers)
-    with urllib.request.urlopen(req, timeout=25, context=ctx) as r:
+    try:
+        response = urllib.request.urlopen(req, timeout=25, context=ctx)
+    except HTTPError as e:
+        if e.code == 304 and validators is not None and (validators.etag or validators.modified):
+            with e:
+                validators.etag = e.headers.get("ETag", validators.etag)
+                validators.modified = e.headers.get("Last-Modified", validators.modified)
+            return None
+        raise
+    with response as r:
         content = r.read()
-    return feedparser.parse(content)
+        encoding = r.headers.get("Content-Encoding", "identity").strip().lower()
+        if encoding == "gzip":
+            content = gzip.decompress(content)
+        elif encoding not in ("", "identity"):
+            raise ValueError("unsupported feed content encoding")
+        parsed = feedparser.parse(content)
+        # 解析失败时不推进版本，下一轮仍可重新获取正文。
+        if validators is not None and not parsed.get("bozo", False):
+            validators.etag = r.headers.get("ETag", "")
+            validators.modified = r.headers.get("Last-Modified", "")
+    return parsed
 
 
 def probe_feed(url: str, rsshub_base: str) -> tuple[bool, int, str]:
@@ -112,6 +155,8 @@ class RSSPoller(threading.Thread):
         self.q = out_queue
         self._stop = threading.Event()
         self._seen = cfg.load_seen()
+        self._validators: dict[str, FeedValidators] = {}
+        self._last_poll: dict[str, float] = {}
 
     def stop(self):
         self._stop.set()
@@ -131,7 +176,7 @@ class RSSPoller(threading.Thread):
                 self.q.put(it)
             cfg.save_seen(self._seen)
             first = False
-            interval = max(15, int(self.conf.get("poll_interval", 60)))
+            interval = max(15, int(self.conf.get("poll_interval", 120)))
             for _ in range(interval):
                 if self._stop.is_set():
                     return
@@ -142,14 +187,25 @@ class RSSPoller(threading.Thread):
         limit = int(self.conf.get("per_feed_limit", 15))
         fresh: list[tuple] = []
         base = self.conf.get("rsshub_base", "")
-        for url in list(self.conf.get("feeds", [])):
+        feeds = list(self.conf.get("feeds", []))
+        active = {resolve_url(url, base) for url in feeds}
+        self._validators = {url: v for url, v in self._validators.items() if url in active}
+        self._last_poll = {url: t for url, t in self._last_poll.items() if url in active}
+        for url in feeds:
             if self._stop.is_set():
                 break
             real = resolve_url(url, base)
+            now = time.monotonic()
+            if real in self._last_poll and now - self._last_poll[real] < feed_interval(real, self.conf):
+                continue
+            self._last_poll[real] = now
             try:
-                d = fetch_parse(real, base)
+                d = fetch_parse(real, base, self._validators.setdefault(real, FeedValidators()))
             except Exception as e:
-                print(f"[sources] 解析失败 {real}: {e}")
+                # URL 可能带用户名、密码或私有路径，不写入错误日志。
+                print(f"[sources] 解析失败 {_host(real)}: {type(e).__name__}")
+                continue
+            if d is None:
                 continue
             source = _clean(getattr(d.feed, "title", "")) or url
             for e in d.entries[:limit]:

@@ -4,7 +4,7 @@ import os
 import sys
 
 APP_NAME = "Bulletin"
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def _data_dir() -> str:
@@ -79,7 +79,8 @@ DEFAULTS = {
     "theme": "Tokyo Night",     # 设置面板主题(见 overlay.THEMES);仅影响设置窗外观
     "rsshub_base": "https://rsshub.app",   # 自建 RSSHub 填这里(如 https://你的域名);feeds 里 {rsshub} 会替换成它
     # 实时性
-    "poll_interval": 60,
+    "poll_interval": 120,
+    "conserve_bandwidth": True,  # 日报30分钟、热搜10分钟，其它源沿用轮询间隔
     "emit_backlog": False,
     "startup_count": 22,        # 启动渐进放出的近期条数(由队列按频率慢慢吐,不是一股脑)
     "spawn_interval_ms": 1400,  # 基础出现间隔;实际按积压量动态节流 + 抖动 → 自然流,不喷泉
