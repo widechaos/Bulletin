@@ -6,7 +6,7 @@
   <a href="https://github.com/widechaos/Bulletin/releases/latest"><img src="https://img.shields.io/github/v/release/widechaos/Bulletin?color=7AA2F7&label=release" alt="release"></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-24283B" alt="platform">
   <img src="https://img.shields.io/badge/python-3.10%2B-3776AB" alt="python">
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/widechaos/Bulletin?color=9ECE6A" alt="license"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-9ECE6A" alt="license"></a>
 </p>
 
 让新闻**以弹幕的形式直接飞在你的桌面上** —— 全透明、置顶、**鼠标穿透不挡任何程序操作**。只有当指针停在某条弹幕上时它才暂停并可点:**左键打开原文,右键 / 托盘开菜单**。
@@ -81,4 +81,6 @@ pyinstaller Bulletin.spec --noconfirm
 
 ## 📄 License
 
-[MIT](LICENSE)
+[PolyForm Noncommercial 1.0.0](LICENSE):个人学习、研究、自用及非营利组织可免费使用和修改;**任何商业用途(含公司内部使用、二次分发牟利、集成进商业产品)都需要另取得商业授权**,请到 [widechaos.cn/bulletin/pro](https://widechaos.cn/bulletin/pro) 联系。
+
+2026-10-17 改许可之前已公开的代码与版本(截至提交 d13f793)仍按当时的 MIT 许可适用于那些版本。
