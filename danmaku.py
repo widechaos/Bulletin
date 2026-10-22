@@ -19,4 +19,6 @@ class Danmu:
     time_w: int = 0         # 时间部分宽度
     speed: float = 2.4
     paused: bool = False
-    _rect: object = field(default=None, repr=False)  # 缓存命中矩形(全局坐标)
+    pix: object = field(default=None, repr=False)    # 预渲染的整条图(含描边),每帧只贴图
+    pad: int = 0            # pix 左右为描边留的边距
+    pad_y: int = 0          # pix 上方超出泳道顶的距离

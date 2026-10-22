@@ -3,13 +3,16 @@
 - 一个全屏透明置顶窗口(仅覆盖主屏一块;弹幕限制在此屏内,不越界飞到外接显示器)
 - QPainter 一帧画完所有弹幕 → 零闪烁(不再是每条一个窗口)
 - 泳道 + 等待队列 → 数学上保证不重叠;满了就排队,天然控密度
-- 默认鼠标穿透;指针停在某条上时该条暂停+可点(左键原文/右键菜单)
+- 每条弹幕生成时预渲染成一张图,每帧只贴图;只重绘弹幕所在的横带,空闲不重绘
+- 默认鼠标穿透;指针停在某条上时该条暂停+可点(左键击碎/右键复制并击碎/Ctrl·⌘+左键原文/中键或⌥右键菜单)
 - 来源分色标签、自适应速度(带开关)
 """
 from __future__ import annotations
 
 import collections
 import ctypes
+import math
+import os
 import random
 import sys
 import threading
@@ -24,6 +27,25 @@ from danmaku import Danmu
 from sources import probe_feed, resolve_url
 
 SPAWN_GAP = 60   # 同泳道两条之间最小水平间隔(px)
+FRAME = 1 / 60   # 速度单位:px/帧(按 60fps 计),实际按真实间隔折算
+GRAVITY = 0.32   # 碎片重力(px/帧²)
+BADGE_LIFE = 1.6  #「已复制」胶囊停留总时长(秒)
+GLOW = 22         # 悬停光晕会超出弹幕本身的上下边距;重绘横带要把它算进去,不然擦不干净
+_RING = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1))
+# 按住它点左键 = 打开原文。mac 上 ⌘ 报 ControlModifier;⌃ 报 MetaModifier,且 ⌃+左键会被系统改成右键
+_LINK_MODS = QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.MetaModifier
+
+
+class _Shard:
+    """击碎后的一块三角碎片:自带小图,绕质心旋转飞散、下落、淡出。"""
+    __slots__ = ("pix", "ox", "oy", "x", "y", "vx", "vy", "a", "va", "age", "life", "r", "wait")
+
+    def __init__(self, pix, ox, oy, x, y, vx, vy, va, life, r, wait):
+        self.pix, self.ox, self.oy = pix, ox, oy    # 小图相对质心的偏移
+        self.x, self.y, self.vx, self.vy = x, y, vx, vy
+        self.a, self.va = 0.0, va
+        self.age, self.life, self.r = 0.0, life, r  # r=外接半径,算重绘范围用
+        self.wait = wait                            # 起飞前原地停留(秒):裂纹从点击处向两侧传开
 
 
 # ===== macOS 原生鼠标穿透:NSWindow.ignoresMouseEvents =====
@@ -53,6 +75,78 @@ def _set_ignores_mouse(nswindow, on: bool):
     fn.restype = None
     fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
     fn(ctypes.c_void_p(nswindow), _OBJC.sel_registerName(b"setIgnoresMouseEvents:"), on)
+
+
+def _activate_app():
+    """菜单栏程序没有前台身份;从菜单打开窗口时要先把自己拉到前台,否则窗口落在别人后面。"""
+    if not _OBJC:
+        return
+    _OBJC.objc_getClass.restype = ctypes.c_void_p
+    _OBJC.objc_getClass.argtypes = [ctypes.c_char_p]
+    fn = _OBJC.objc_msgSend
+    fn.restype = ctypes.c_void_p
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    app = fn(_OBJC.objc_getClass(b"NSApplication"), _OBJC.sel_registerName(b"sharedApplication"))
+    fn.restype = None
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool]
+    fn(app, _OBJC.sel_registerName(b"activateIgnoringOtherApps:"), True)
+
+
+def _ensure_tray_position(from_right: float = 360.0):
+    """新装时把菜单栏图标放到靠右的位置。macOS 默认把新图标插在最左边,
+    刘海屏菜单栏一满就被藏到刘海后面,用户只会觉得「启动不了」。已有位置(含用户⌘拖动过的)不动。"""
+    if not _OBJC:
+        return
+    o = _OBJC
+    o.objc_getClass.restype = ctypes.c_void_p
+    o.objc_getClass.argtypes = [ctypes.c_char_p]
+    fn = o.objc_msgSend
+    fn.restype = ctypes.c_void_p
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    ud = fn(o.objc_getClass(b"NSUserDefaults"), o.sel_registerName(b"standardUserDefaults"))
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+    key = fn(o.objc_getClass(b"NSString"), o.sel_registerName(b"stringWithUTF8String:"),
+             b"NSStatusItem Preferred Position Item-0")
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    if fn(ud, o.sel_registerName(b"objectForKey:"), key):
+        return
+    fn.restype = None
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double, ctypes.c_void_p]
+    fn(ud, o.sel_registerName(b"setDouble:forKey:"), from_right, key)
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    fn(ud, o.sel_registerName(b"synchronize"))
+
+
+def _objc_fn(restype, *argtypes):
+    fn = _OBJC.objc_msgSend
+    fn.restype = restype
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, *argtypes]
+    return fn
+
+
+def _frontmost_pid() -> int:
+    """当前前台应用的进程号(NSWorkspace.frontmostApplication)。"""
+    if not _OBJC:
+        return 0
+    _OBJC.objc_getClass.restype = ctypes.c_void_p
+    _OBJC.objc_getClass.argtypes = [ctypes.c_char_p]
+    sel = _OBJC.sel_registerName
+    ws = _objc_fn(ctypes.c_void_p)(_OBJC.objc_getClass(b"NSWorkspace"), sel(b"sharedWorkspace"))
+    ra = _objc_fn(ctypes.c_void_p)(ws, sel(b"frontmostApplication"))
+    return _objc_fn(ctypes.c_int)(ra, sel(b"processIdentifier")) if ra else 0
+
+
+def _activate_pid(pid: int):
+    """把焦点交还给指定进程。点弹幕时 macOS 会把本程序拉到前台,NSApp.deactivate 在新系统上无效,只能这样还回去。"""
+    if not _OBJC or not pid:
+        return
+    _OBJC.objc_getClass.restype = ctypes.c_void_p
+    _OBJC.objc_getClass.argtypes = [ctypes.c_char_p]
+    sel = _OBJC.sel_registerName
+    ra = _objc_fn(ctypes.c_void_p, ctypes.c_int)(
+        _OBJC.objc_getClass(b"NSRunningApplication"), sel(b"runningApplicationWithProcessIdentifier:"), pid)
+    if ra:
+        _objc_fn(ctypes.c_bool, ctypes.c_ulong)(ra, sel(b"activateWithOptions:"), 0)
 
 
 def rel_time(ts: float) -> str:
@@ -87,10 +181,19 @@ class OverlayWindow(QtWidgets.QWidget):
         self.danmu: list[Danmu] = []
         self.pending: collections.deque = collections.deque()
         self.hovered: Danmu | None = None
+        self.shards: list[_Shard] = []
+        self.bursts: list[dict] = []        # 击碎点的冲击环 +「已复制」胶囊
+        self._last_tick = time.monotonic()
+        self._painted_band: tuple[int, int] | None = None   # 上一帧画过的纵向范围
         self._src_colors: dict[str, str] = {}
         self.seen_sources: list[str] = []   # 出现过的来源(供「按来源开关」列表)
         self._dlg: SettingsDialog | None = None
         self._settings_paused = False
+        self._hidden = False                # 菜单「隐藏弹幕」
+        self._link_mode = False             # 按着 Ctrl/⌘:指针变手形、显示下划线,左键打开原文
+        self._flow = 1.0                    # 流速系数:暂停/恢复时在 0↔1 间缓动,不是一下刹死
+        self._hover_since = 0.0             # 悬停光晕淡入计时
+        self._fade: QtCore.QPropertyAnimation | None = None
 
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -108,6 +211,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self.setWindowOpacity(float(conf["opacity"]))
 
         self.anim = QtCore.QTimer(self)
+        self.anim.setTimerType(QtCore.Qt.TimerType.PreciseTimer)   # 默认粗定时器在 mac 上会合并触发,滚动发顿
         self.anim.timeout.connect(self._advance)
         self.anim.start(16)
         self.spawn_t = QtCore.QTimer(self)
@@ -122,12 +226,73 @@ class OverlayWindow(QtWidgets.QWidget):
         self.fs_t.timeout.connect(self._check_fullscreen)
         self.fs_t.start(2000)          # 每 2s 查一次前台是否全屏
 
+        if getattr(sys, "frozen", False):     # 只在打包版改用户偏好,源码运行写的是 python 的域
+            try:
+                _ensure_tray_position()
+            except Exception:
+                pass
         self._build_tray()
         self.show()          # 用 show()(几何已=整屏);不用 showFullScreen 以免进 macOS 全屏 Space
         self.raise_()
+        self._apply_native()
+
+        # 插拔显示器/改分辨率时跟着挪:原来只在启动时定一次位置,拔掉外接屏后弹幕层还停在旧尺寸上
+        app = QtWidgets.QApplication.instance()
+        app.screenAdded.connect(self._watch_screen)
+        app.screenRemoved.connect(lambda _s: self._schedule_refit())
+        app.primaryScreenChanged.connect(lambda _s: self._schedule_refit())
+        for scr in app.screens():
+            self._watch_screen(scr, refit=False)
+
+        # 程序已在运行时再次打开它(双击图标/启动台/Spotlight):弹出设置窗口。
+        # 菜单栏图标多时 macOS 会把托盘图标藏到刘海后面,不然用户只会觉得「启动不了」。
+        self._born = time.monotonic()
+        self._self_activated = 0.0
+        app.applicationStateChanged.connect(self._on_app_state)
+
+    def _on_app_state(self, st):
+        if st != QtCore.Qt.ApplicationState.ApplicationActive:
+            return
+        if time.monotonic() - self._born < 4:          # 启动本身那次激活不算
+            return
+        QtCore.QTimer.singleShot(250, self._show_on_reopen)
+
+    def _show_on_reopen(self):
+        app = QtWidgets.QApplication.instance()
+        if time.monotonic() - self._self_activated < 1.5:   # 是自己拉到前台的(打开设置)
+            return
+        if time.monotonic() - getattr(self, "_last_press", 0.0) < 1.5:   # 刚点过弹幕
+            return
+        if app.activePopupWidget() or app.activeModalWidget():
+            return
+        if any(w is not self and w.isWindow() and w.isVisible() and not isinstance(w, QtWidgets.QMenu)
+               for w in app.topLevelWidgets()):
+            return
+        self.open_settings()
+
+    def _watch_screen(self, scr, refit: bool = True):
+        scr.geometryChanged.connect(lambda _g: self._schedule_refit())
+        if refit:
+            self._schedule_refit()
+
+    def _schedule_refit(self):
+        QtCore.QTimer.singleShot(600, self._refit)    # 等系统把屏幕排布稳定下来
+
+    def _refit(self):
+        g = self._target_geometry()
+        if g == self.geometry():
+            return
+        self.setGeometry(g)
+        self._apply_native()
+        self.danmu = [d for d in self.danmu if d.y + d.h <= self.height()]   # 新屏放不下的泳道直接收掉
+        self.hovered = None
+        self.update()
+
+    def _apply_native(self):
+        """窗口级原生属性:鼠标穿透。显示/重建窗口后都要再设一次。"""
         if sys.platform == "darwin":
             self._nswin = _nswindow_from_view(self.winId())
-            _set_ignores_mouse(self._nswin, True)   # 默认穿透(OS 级)
+            _set_ignores_mouse(self._nswin, self._click_through)   # 默认穿透(OS 级)
 
     # ---------- 显示器 ----------
     def _target_geometry(self) -> QtCore.QRect:
@@ -147,6 +312,12 @@ class OverlayWindow(QtWidgets.QWidget):
         self._font = QtGui.QFont(fam, int(self.conf["font_size"]))
         self._font.setBold(True)
         self._fm = QtGui.QFontMetrics(self._font)
+        px = max(14, min(22, round(int(self.conf["font_size"]) * 0.56)))
+        self._badge_font = QtGui.QFont(fam)
+        self._badge_font.setPixelSize(px)
+        self._badge_font.setWeight(QtGui.QFont.Weight.DemiBold)
+        self._badge_sub = QtGui.QFont(fam)
+        self._badge_sub.setPixelSize(px - 2)
 
     def _lane_h(self) -> int:
         return self._fm.height() + 10
@@ -164,15 +335,19 @@ class OverlayWindow(QtWidgets.QWidget):
                 item = self.q.get_nowait()
             except Exception:
                 break
-            self.pending.append(item)
             if item.source not in self.seen_sources:   # 供设置里「按来源开关」列出
                 self.seen_sources.append(item.source)
+            self.pending.append(item)
+
+    def _visible_now(self) -> bool:
+        return not (self.paused or self._fs_paused or self._hidden)
 
     def _lane_of(self, d: Danmu, band_top: int, lh: int) -> int:
         return (d.y - band_top) // lh
 
     def _try_spawn(self):
         try:
+            self._drain_queue()      # 暂停/隐藏时也收,恢复后接着放
             self._spawn_once()
         finally:
             self.spawn_t.start(self._next_delay())   # 每次按当前积压量重新排期
@@ -205,9 +380,8 @@ class OverlayWindow(QtWidgets.QWidget):
         return None
 
     def _spawn_once(self):
-        if self.paused or self._fs_paused or not self._interval_ok():
+        if not self._visible_now() or not self._interval_ok():
             return
-        self._drain_queue()
         if not self.pending or len(self.danmu) >= int(self.conf["max_on_screen"]):
             return
         W = self.width()
@@ -232,24 +406,180 @@ class OverlayWindow(QtWidgets.QWidget):
         return max(cur, key=lambda d: d.x, default=None)
 
     def _make_danmu(self, item, y, last, W):
-        color = self._color_for(item.source)
-        tag = f"[{item.source}]  " if self.conf.get("show_source_tag", True) else ""
-        time_str = (rel_time(item.ts) + "  ") if (self.conf.get("show_time", True) and item.ts) else ""
-        tag_w = self._fm.horizontalAdvance(tag)
-        time_w = self._fm.horizontalAdvance(time_str)
-        title_w = self._fm.horizontalAdvance(item.title)
-        w = tag_w + time_w + title_w
+        d = Danmu(text=item.title, url=item.url, source=item.source, source_color=self._color_for(item.source),
+                  x=float(W), y=int(y), time_str=(rel_time(item.ts) + "  ") if (
+                      self.conf.get("show_time", True) and item.ts) else "")
+        self._render(d)
         base = float(self.conf["speed"])
         speed = base
         if self.conf.get("adaptive_speed", False):
-            factor = 1.0 + min(0.6, (w / max(W, 1)) * 0.8)
+            factor = 1.0 + min(0.6, (d.w / max(W, 1)) * 0.8)
             speed = min(base * factor, float(self.conf.get("adaptive_max_speed", 4.0)))
-            if last is not None:                 # 不超车,防重叠
-                speed = min(speed, last.speed)
-        d = Danmu(text=item.title, url=item.url, source=item.source, source_color=color,
-                  x=float(W), y=int(y), w=int(w), h=self._fm.height(),
-                  tag_w=int(tag_w), time_str=time_str, time_w=int(time_w), speed=speed)
+        if last is not None:                 # 不超车,防重叠
+            speed = min(speed, last.speed)
+        d.speed = speed
         self.danmu.append(d)
+
+    def _render(self, d: Danmu):
+        """把整条弹幕(描边+来源色+时间+正文)画进一张透明图。
+        原来每帧每条要 drawText 9 次以上,现在生成时画一次,之后每帧只贴图;击碎也直接切这张图。"""
+        fm = self._fm
+        tag = f"[{d.source}]  " if self.conf.get("show_source_tag", True) else ""
+        d.tag_w = fm.horizontalAdvance(tag)
+        d.time_w = fm.horizontalAdvance(d.time_str)
+        d.w = d.tag_w + d.time_w + fm.horizontalAdvance(d.text)
+        d.h = fm.height()
+        ol = int(self.conf.get("outline", 2))
+        d.pad = d.pad_y = pad = ol + 2
+        dpr = self.devicePixelRatioF()
+        pix = QtGui.QPixmap(math.ceil((d.w + 2 * pad) * dpr), math.ceil((d.h + 2 * pad) * dpr))
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(QtCore.Qt.GlobalColor.transparent)
+        p = QtGui.QPainter(pix)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
+        p.setFont(self._font)
+        x, base = pad, pad + fm.ascent()
+        full = tag + d.time_str + d.text
+        # 描边:八向黑边,强度=outline(0 时退化为单像素投影),保证任何背景上都清晰
+        if ol > 0:
+            p.setPen(QtGui.QColor(0, 0, 0, 235))
+            for dx, dy in _RING:
+                p.drawText(x + dx * ol, base + dy * ol, full)
+        else:
+            p.setPen(QtGui.QColor(0, 0, 0, 200))
+            p.drawText(x + 1, base + 1, full)
+        # 分段上色:来源色 → 时间灰 → 正文
+        if tag:
+            p.setPen(QtGui.QColor(d.source_color))
+            p.drawText(x, base, tag)
+            x += d.tag_w
+        if d.time_str:
+            p.setPen(QtGui.QColor("#93A2B4"))
+            p.drawText(x, base, d.time_str)
+            x += d.time_w
+        colorful = self.conf.get("colorful", False)
+        p.setPen(QtGui.QColor(d.source_color) if colorful else QtGui.QColor(self.conf["font_color"]))
+        p.drawText(x, base, d.text)
+        p.end()
+        d.pix = pix
+
+    # ---------- 击碎 ----------
+    def _shatter(self, d: Danmu, at: QtCore.QPointF, badge: bool = True):
+        """把弹幕图切成抖动网格三角片,从点击处向外炸开。碎片各自预裁好小图,每帧只是平移旋转贴图。"""
+        src = d.pix
+        dpr = src.devicePixelRatio()
+        img = src.toImage()
+        pw, ph = src.width() / dpr, src.height() / dpr
+        left, top = d.x - d.pad, d.y - d.pad_y
+        cols = max(4, min(36, round(pw / 20)))
+        rows = max(2, min(4, round(ph / 15)))
+        cw, rh = pw / cols, ph / rows
+        grid = [[QtCore.QPointF(
+            c * cw + (random.uniform(-0.38, 0.38) * cw if 0 < c < cols else 0),
+            r * rh + (random.uniform(-0.38, 0.38) * rh if 0 < r < rows else 0))
+            for c in range(cols + 1)] for r in range(rows + 1)]
+        tris = []
+        for r in range(rows):
+            for c in range(cols):
+                a, b = grid[r][c], grid[r][c + 1]
+                e, f = grid[r + 1][c], grid[r + 1][c + 1]
+                if random.random() < 0.5:
+                    tris += [(a, b, f), (a, f, e)]
+                else:
+                    tris += [(a, b, e), (b, f, e)]
+        reach = max(pw, 1.0)
+        for tri in tris:
+            poly = QtGui.QPolygonF(list(tri))
+            br = poly.boundingRect().toAlignedRect()
+            if not self._has_ink(img, br, dpr):     # 字缝里的空片不生成,省得白算
+                continue
+            sp = QtGui.QPixmap(math.ceil(br.width() * dpr) + 1, math.ceil(br.height() * dpr) + 1)
+            sp.setDevicePixelRatio(dpr)
+            sp.fill(QtCore.Qt.GlobalColor.transparent)
+            q = QtGui.QPainter(sp)
+            q.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+            path = QtGui.QPainterPath()
+            path.addPolygon(poly.translated(-br.left(), -br.top()))
+            q.setClipPath(path)
+            q.drawPixmap(QtCore.QPointF(-br.left(), -br.top()), src)
+            q.end()
+            cx = sum(pt.x() for pt in tri) / 3
+            cy = sum(pt.y() for pt in tri) / 3
+            sx, sy = left + cx, top + cy
+            dx, dy = sx - at.x(), sy - at.y()
+            dist = math.hypot(dx, dy) or 1.0
+            near = max(0.0, 1.0 - dist / reach)     # 离点击处越近飞得越猛
+            spd = random.uniform(1.5, 4.5) + 9.0 * near ** 2
+            self.shards.append(_Shard(
+                sp, br.left() - cx, br.top() - cy, sx, sy,
+                vx=dx / dist * spd + random.uniform(-0.8, 0.8),
+                vy=dy / dist * spd * 0.7 - random.uniform(1.5, 4.5),
+                va=random.uniform(-16, 16), life=random.uniform(0.55, 0.95),
+                r=math.hypot(br.width(), br.height()),
+                wait=dist / 3200 + random.uniform(0, 0.02)))
+        if badge:
+            self.bursts.append(self._make_badge(d, at))
+        else:                                # 左键纯击碎:只留冲击环
+            self.bursts.append({"x": at.x(), "y": at.y(), "by": at.y(), "H": 0, "age": 0.0,
+                                "life": 0.3, "color": QtGui.QColor(d.source_color)})
+
+    def _make_badge(self, d: Danmu, at: QtCore.QPointF) -> dict:
+        """「已复制」胶囊:摆在点击处上方(贴边时收回屏内);挑十几块碎片的位置当光点起点,
+        光点沿弧线汇入左侧圆圈,圆圈点亮、勾画出来 —— 像碎片被收进了剪贴板。"""
+        fm = QtGui.QFontMetricsF(self._badge_font)
+        fm2 = QtGui.QFontMetricsF(self._badge_sub)
+        snip = fm2.elidedText(d.text, QtCore.Qt.TextElideMode.ElideRight, fm2.horizontalAdvance("字") * 14)
+        H = round(fm.height() * 2.05)
+        cd = H - 10
+        label_w = fm.horizontalAdvance("已复制")
+        W0 = 5 + cd + 10 + label_w + H * 0.42           # 只含「✓ 已复制」的收拢宽度
+        W = W0 + 13 + fm2.horizontalAdvance(snip)        # 摘要滑入后的展开宽度
+        m = 14
+        bx = min(max(at.x(), W / 2 + m), self.width() - W / 2 - m)
+        by = at.y() - d.h / 2 - H / 2 - 18
+        if by - H / 2 < m:                              # 顶上放不下就放到下方
+            by = at.y() + d.h / 2 + H / 2 + 18
+        picks = random.sample(self.shards[-160:], min(16, len(self.shards[-160:]))) if self.shards else []
+        seeds = [(s.x, s.y, random.uniform(0.0, 0.07)) for s in picks]
+        return {"x": at.x(), "y": at.y(), "bx": bx, "by": by, "W0": W0, "W": W, "H": H, "cd": cd,
+                "label_w": label_w, "snip": snip, "seeds": seeds, "age": 0.0,
+                "color": QtGui.QColor(d.source_color)}
+
+    @staticmethod
+    def _has_ink(img: QtGui.QImage, br: QtCore.QRect, dpr: float) -> bool:
+        step = 3
+        for yy in range(br.top(), br.bottom() + 1, step):
+            for xx in range(br.left(), br.right() + 1, step):
+                px, py = int(xx * dpr), int(yy * dpr)
+                if 0 <= px < img.width() and 0 <= py < img.height() and img.pixelColor(px, py).alpha() > 40:
+                    return True
+        return False
+
+    def _step_fx(self, dt: float) -> bool:
+        """推进碎片与冲击环;dt 以帧为单位。返回是否还有特效在跑。"""
+        sec = dt * FRAME
+        alive = []
+        drag = 0.985 ** dt
+        for s in self.shards:
+            if s.wait > 0:
+                s.wait -= sec
+                alive.append(s)
+                continue
+            s.age += sec
+            if s.age >= s.life:
+                continue
+            s.vy += GRAVITY * dt
+            s.vx *= drag
+            s.x += s.vx * dt
+            s.y += s.vy * dt
+            s.a += s.va * dt
+            alive.append(s)
+        self.shards = alive
+        for b in self.bursts:
+            b["age"] += sec
+        self.bursts = [b for b in self.bursts if b["age"] < b.get("life", BADGE_LIFE)]
+        return bool(self.shards or self.bursts)
 
     # ---------- 动画 ----------
     def _check_fullscreen(self):
@@ -263,64 +593,215 @@ class OverlayWindow(QtWidgets.QWidget):
             self._fs_paused = False
 
     def _advance(self):
-        if self.paused or self._fs_paused:      # 全屏(看视频/演示)时冻结,不打扰
+        now = time.monotonic()
+        dt = min(4.0, (now - self._last_tick) / FRAME)   # 按真实间隔折算成帧,卡顿后不瞬移太远
+        self._last_tick = now
+        moved = False
+        target = 0.0 if (self.paused or self._fs_paused) else 1.0   # 全屏(看视频/演示)时冻结,不打扰
+        if self._flow != target:                      # 0.35 秒缓停 / 缓起
+            step = dt * FRAME / 0.35
+            self._flow = min(target, self._flow + step) if target > self._flow else max(target, self._flow - step)
+        if self._flow > 0:
+            dead = []
+            for d in self.danmu:
+                if d.paused:
+                    continue
+                d.x -= d.speed * dt * self._flow
+                moved = True
+                if d.x + d.w < 0:
+                    dead.append(d)
+            for d in dead:
+                if d is self.hovered:
+                    self.hovered = None
+                self.danmu.remove(d)
+        fx = self._step_fx(dt)           # 碎片在暂停时也要飞完
+        self._repaint_band(moved or fx or self._live_fx(now))
+
+    def _live_fx(self, now: float) -> bool:
+        """静止时也要逐帧重绘的装饰:悬停光晕淡入。"""
+        return self.hovered is not None and now - self._hover_since < 0.25
+
+    def _repaint_band(self, force: bool = True):
+        """只重绘有东西的那一段横带(连同上一帧画过的范围,好擦掉残影);静止或全空时不重绘。"""
+        ys = [(d.y - d.pad_y - GLOW, d.y + d.h + d.pad_y + GLOW) for d in self.danmu]
+        ys += [(int(s.y - s.r), int(s.y + s.r)) for s in self.shards]
+        ys += [(int(min(b["y"], b["by"], b.get("sy", b["y"])) - b["H"] - 50), int(max(b["y"], b["by"]) + b["H"] + 30))
+               for b in self.bursts]
+        cur = (min(a for a, _ in ys), max(b for _, b in ys)) if ys else None
+        prev = self._painted_band
+        if not force and cur == prev:
             return
-        dead = []
-        for d in self.danmu:
-            if d.paused:
-                continue
-            d.x -= d.speed
-            if d.x + d.w < 0:
-                dead.append(d)
-        for d in dead:
-            if d is self.hovered:
-                self.hovered = None
-            self.danmu.remove(d)
-        self.update()
+        self._painted_band = cur
+        span = [r for r in (prev, cur) if r]
+        if span:
+            top = min(a for a, _ in span) - 2
+            bot = max(b for _, b in span) + 2
+            self.update(0, top, self.width(), bot - top)
 
     # ---------- 绘制(单画布,零闪烁) ----------
     def paintEvent(self, _e):
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-        p.setFont(self._font)
-        fm = self._fm
-        base_color = QtGui.QColor(self.conf["font_color"])
-        time_color = QtGui.QColor("#93A2B4")
-        shadow = QtGui.QColor(0, 0, 0, 200)
-        show_tag = self.conf.get("show_source_tag", True)
-        colorful = self.conf.get("colorful", False)
-        ol = int(self.conf.get("outline", 2))
-        _ring = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1))
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform, True)
+        now = time.monotonic()
         for d in self.danmu:
             x = int(d.x)
-            base = d.y + fm.ascent()
-            tag = f"[{d.source}]  " if show_tag else ""
-            full = tag + d.time_str + d.text
-            # 描边:八向黑边,强度=outline(0 时退化为单像素投影),保证任何背景上都清晰
-            if ol > 0:
-                p.setPen(QtGui.QColor(0, 0, 0, 235))
-                for dx, dy in _ring:
-                    p.drawText(x + dx * ol, base + dy * ol, full)
-            else:
-                p.setPen(shadow)
-                p.drawText(x + 1, base + 1, full)
-            # 分段上色:来源色 → 时间灰 → 正文
-            cx = x
-            if tag:
-                p.setPen(QtGui.QColor(d.source_color))
-                p.drawText(cx, base, tag)
-                cx += d.tag_w
-            if d.time_str:
-                p.setPen(time_color)
-                p.drawText(cx, base, d.time_str)
-                cx += d.time_w
-            p.setPen(QtGui.QColor(d.source_color) if colorful else base_color)
-            p.drawText(cx, base, d.text)
-            if d is self.hovered and d.url:
+            if d is self.hovered:
+                self._paint_halo(p, d, x, min(1.0, (now - self._hover_since) / 0.18))
+            p.drawPixmap(x - d.pad, d.y - d.pad_y, d.pix)
+            if d is self.hovered and d.url and self._link_mode:
+                ul = d.y + self._fm.ascent() + 3
                 p.setPen(QtGui.QPen(QtGui.QColor(d.source_color), 1))
-                p.drawLine(x, base + 3, x + d.w, base + 3)
+                p.drawLine(x, ul, x + d.w, ul)
+        if self.shards or self.bursts:
+            self._paint_fx(p)
         p.end()
+
+    def _paint_halo(self, p: QtGui.QPainter, d: Danmu, x: int, k: float):
+        """悬停的那条:身后一圈来源色柔光,淡入;按着 Ctrl/⌘(可打开原文)时更亮。"""
+        p.save()
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        r = QtCore.QRectF(x - 10, d.y - d.pad_y + d.pad - 3, d.w + 20, d.h + 2 * (d.pad_y - d.pad) + 6)
+        strength = (0.032 if self._link_mode else 0.02) * k
+        for i in range(6, 0, -1):
+            c = QtGui.QColor(d.source_color)
+            c.setAlphaF(strength * (7 - i))
+            e = i * 2.6
+            p.setBrush(c)
+            p.drawRoundedRect(r.adjusted(-e, -e, e, e), r.height() / 2 + e, r.height() / 2 + e)
+        p.restore()
+
+    def _paint_fx(self, p: QtGui.QPainter):
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        for s in self.shards:
+            t = s.age / s.life
+            p.save()
+            p.setOpacity(1.0 if t < 0.45 else max(0.0, 1 - ((t - 0.45) / 0.55) ** 1.5))
+            p.translate(s.x, s.y)
+            p.rotate(s.a)
+            sc = 1.0 - 0.35 * t
+            p.scale(sc, sc)
+            p.drawPixmap(QtCore.QPointF(s.ox, s.oy), s.pix)
+            p.restore()
+        for b in self.bursts:
+            t = b["age"]
+            if t < 0.28:                       # 冲击环:快速扩张变细淡出
+                k = t / 0.28
+                c = QtGui.QColor(b["color"])
+                c.setAlphaF(0.9 * (1 - k))
+                p.setOpacity(1.0)
+                p.setPen(QtGui.QPen(c, 3.5 * (1 - k) + 0.5))
+                p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                rad = 6 + 46 * (1 - (1 - k) ** 3)
+                p.drawEllipse(QtCore.QPointF(b["x"], b["y"]), rad, rad)
+            if "W" in b:
+                self._paint_badge(p, b, t)
+        p.setOpacity(1.0)
+
+    def _paint_badge(self, p: QtGui.QPainter, b: dict, t: float):
+        QPF = QtCore.QPointF
+        col = b["color"]
+        H, cd = b["H"], b["cd"]
+        ks2 = min(1.0, max(0.0, (t - 0.42) / 0.25))      # 勾画完后胶囊展开、摘要滑入
+        W = b["W0"] + (b["W"] - b["W0"]) * (1 - (1 - ks2) ** 3)
+        x, y = b["bx"], b["by"]
+        left = x - W / 2
+        ccx = left + 5 + cd / 2                 # 勾圈中心
+        no_pen = QtCore.Qt.PenStyle.NoPen
+        # 1) 光点:碎片沿弧线飞进勾圈,带三节拖尾
+        p.setOpacity(1.0)
+        p.setPen(no_pen)
+        for sx, sy, dl in b["seeds"]:
+            k = (t - dl) / 0.3
+            if not 0 < k < 1:
+                continue
+            for j in range(4):
+                kj = max(0.0, k - j * 0.04)
+                e = kj * kj
+                px = sx + (ccx - sx) * e
+                py = sy + (y - sy) * e - math.sin(kj * math.pi) * 30
+                c = QtGui.QColor(col)
+                c.setAlphaF(0.95 * (1 - j / 4))
+                p.setBrush(c)
+                r = 3.0 - j * 0.6
+                p.drawEllipse(QPF(px, py), r, r)
+                if j == 0:
+                    c.setAlphaF(0.22)
+                    p.setBrush(c)
+                    p.drawEllipse(QPF(px, py), r * 2.6, r * 2.6)
+        # 2) 胶囊:回弹弹出 → 停留 → 上浮淡出
+        ks = min(1.0, t / 0.3)
+        k1 = ks - 1
+        sc = 0.55 + 0.45 * (1 + 2.9 * k1 ** 3 + 1.9 * k1 ** 2)
+        out = max(0.0, (t - (BADGE_LIFE - 0.3)) / 0.3)
+        p.save()
+        p.setOpacity(min(1.0, t / 0.08) * (1 - out))
+        p.translate(x, y - 16 * (1 - (1 - out) ** 3))
+        p.scale(sc, sc)
+        p.translate(-x, -y)
+        r = QtCore.QRectF(left, y - H / 2, W, H)
+        p.setPen(no_pen)
+        for i in range(6, 0, -1):               # 外发光
+            g = QtGui.QColor(col)
+            g.setAlphaF(0.035 * (7 - i))
+            p.setBrush(g)
+            e = i * 1.7
+            p.drawRoundedRect(r.adjusted(-e, -e, e, e), H / 2 + e, H / 2 + e)
+        grad = QtGui.QLinearGradient(r.topLeft(), r.topRight())
+        c2 = QtGui.QColor(col)
+        c2.setAlphaF(0.12)
+        grad.setColorAt(0, col)
+        grad.setColorAt(1, c2)
+        p.setPen(QtGui.QPen(QtGui.QBrush(grad), 1.3))
+        p.setBrush(QtGui.QColor(13, 16, 23, 232))
+        p.drawRoundedRect(r, H / 2, H / 2)
+        # 3) 勾圈:光点到齐时点亮、脉冲一下、外扩一圈,随后勾一笔画出
+        lit = min(1.0, max(0.0, (t - 0.3) / 0.08))
+        pulse = 1 + 0.16 * math.sin(min(1.0, max(0.0, (t - 0.3) / 0.22)) * math.pi)
+        rad = cd / 2 * pulse
+        ring = QtGui.QColor(col)
+        ring.setAlphaF(0.55 + 0.45 * lit)
+        fill = QtGui.QColor(col)
+        fill.setAlphaF(lit)
+        p.setPen(QtGui.QPen(ring, 1.8))
+        p.setBrush(fill)
+        p.drawEllipse(QPF(ccx, y), rad, rad)
+        if 0.3 < t < 0.6:
+            fl = (t - 0.3) / 0.3
+            fc = QtGui.QColor(col)
+            fc.setAlphaF(0.75 * (1 - fl))
+            p.setPen(QtGui.QPen(fc, 2.2))
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPF(ccx, y), cd / 2 + 14 * fl, cd / 2 + 14 * fl)
+        kc = min(1.0, max(0.0, (t - 0.36) / 0.16))
+        if kc > 0:
+            path = QtGui.QPainterPath(QPF(ccx - cd * 0.25, y + cd * 0.01))
+            path.lineTo(QPF(ccx - cd * 0.07, y + cd * 0.2))
+            path.lineTo(QPF(ccx + cd * 0.27, y - cd * 0.19))
+            lw = max(2.4, cd * 0.11)
+            pen = QtGui.QPen(QtGui.QColor(10, 12, 18), lw, QtCore.Qt.PenStyle.SolidLine,
+                             QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin)
+            pen.setDashPattern([path.length() * kc / lw + 0.01, 1000])
+            p.setPen(pen)
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        # 4) 文字:「已复制」+ 细分隔 + 灰色标题摘要(勾画完后从左滑入)
+        fm = QtGui.QFontMetricsF(self._badge_font)
+        tx = left + 5 + cd + 10
+        p.setFont(self._badge_font)
+        p.setPen(QtGui.QColor(242, 245, 250))
+        p.drawText(QPF(tx, y + (fm.ascent() - fm.descent()) / 2), "已复制")
+        tx += b["label_w"] + 6
+        if ks2 > 0:
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, round(46 * ks2)), 1))
+            p.drawLine(QPF(tx, y - H * 0.22), QPF(tx, y + H * 0.22))
+            fm2 = QtGui.QFontMetricsF(self._badge_sub)
+            p.setOpacity(p.opacity() * ks2)
+            p.setFont(self._badge_sub)
+            p.setPen(QtGui.QColor(162, 172, 188))
+            p.setClipRect(QtCore.QRectF(tx, y - H / 2, left + W - tx - H * 0.3, H))
+            p.drawText(QPF(tx + 7 - 8 * (1 - ks2) ** 2, y + (fm2.ascent() - fm2.descent()) / 2), b["snip"])
+        p.restore()
 
     # ---------- 悬停:指针下那条暂停并可点 ----------
     def _hover(self):
@@ -330,17 +811,26 @@ class OverlayWindow(QtWidgets.QWidget):
             if QtCore.QRect(int(d.x), d.y, d.w, d.h).contains(lp):
                 target = d
                 break
-        if target is not self.hovered:
-            if self.hovered is not None:
-                self.hovered.paused = False
-            self.hovered = target
-            if target is not None and self.conf.get("hover_pause", True):
-                target.paused = True
+        link = bool(QtGui.QGuiApplication.queryKeyboardModifiers() & _LINK_MODS)
+        if target is not self.hovered or link != self._link_mode:
+            if target is not self.hovered:
+                if target is not None and self.hovered is None and \
+                        QtGui.QGuiApplication.applicationState() != QtCore.Qt.ApplicationState.ApplicationActive:
+                    pid = _frontmost_pid()             # 指针刚压上弹幕、还没点:记下用户正在用的应用
+                    self._prev_pid = pid if pid != os.getpid() else 0
+                if self.hovered is not None:
+                    self.hovered.paused = False
+                self.hovered = target
+                self._hover_since = time.monotonic()
+                if target is not None and self.conf.get("hover_pause", True):
+                    target.paused = True
+            self._link_mode = link
             self.setCursor(
                 QtCore.Qt.CursorShape.PointingHandCursor
-                if (target is not None and target.url)
+                if (target is not None and target.url and link)
                 else QtCore.Qt.CursorShape.ArrowCursor
             )
+            self._repaint_band()   # 下划线跟着变(暂停时动画不重绘,这里补一次)
         # 每帧幂等强制同步穿透:只有指针正压在某条弹幕上时才接管鼠标,其余一律穿透。
         # (不被上面的提前分支跳过——否则点开弹幕后会卡成全屏隐形墙。)
         self._set_click_through(target is None)
@@ -355,23 +845,50 @@ class OverlayWindow(QtWidgets.QWidget):
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents, on)
 
     def mousePressEvent(self, e: QtGui.QMouseEvent):
+        self._last_press = time.monotonic()    # 点弹幕引起的激活不能当成「重复打开」
         d = self.hovered
         if d is None:
             e.ignore()
             return
-        if e.button() == QtCore.Qt.MouseButton.LeftButton:
+        btn = e.button()
+        B = QtCore.Qt.MouseButton
+        menu_mods = e.modifiers() & (QtCore.Qt.KeyboardModifier.AltModifier | QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if btn == B.MiddleButton or (btn == B.RightButton and menu_mods):
+            self._ctx_menu = self._menu()      # 中键 / ⌥右键开菜单(触控板没中键);持有引用防被回收
+            self._ctx_menu.popup(e.globalPosition().toPoint())
+        elif btn in (B.LeftButton, B.RightButton) and e.modifiers() & _LINK_MODS:
+            # Ctrl/⌘ + 左键:打开原文(mac 的 ⌃+左键到这里是「右键+Meta」,一并认)
             if d.url:
                 webbrowser.open(d.url)
-                if d in self.danmu:            # 点过即移除(相当于已读)
-                    self.danmu.remove(d)
-                self.hovered = None
-                self._set_click_through(True)  # 立即恢复穿透,别卡成隐形墙
-        elif e.button() == QtCore.Qt.MouseButton.MiddleButton:
-            QtWidgets.QApplication.clipboard().setText(d.text)   # 中键复制标题
-            self.tray.showMessage("已复制标题", d.text, self.tray.icon(), 1500)
-        elif e.button() == QtCore.Qt.MouseButton.RightButton:
-            self._menu().popup(e.globalPosition().toPoint())
+                self._dismiss(d)               # 点过即移除(相当于已读)
+        elif btn == B.LeftButton:
+            self._shatter(d, e.position(), badge=False)   # 左键:直接击碎
+            self._dismiss(d)
+            self._give_back_focus()
+        elif btn == B.RightButton:
+            # 右键:复制「标题 + 链接」,并当场击碎
+            QtWidgets.QApplication.clipboard().setText(f"{d.text}\n{d.url}" if d.url else d.text)
+            self._shatter(d, e.position())
+            self._dismiss(d)
+            self._give_back_focus()
         e.accept()
+
+    def _give_back_focus(self):
+        app = QtWidgets.QApplication.instance()
+        if any(w is not self and w.isWindow() and w.isVisible() and not isinstance(w, QtWidgets.QMenu)
+               for w in app.topLevelWidgets()):
+            return                              # 设置开着,用户在用本程序,不让出
+        pid = getattr(self, "_prev_pid", 0)
+        if pid:
+            QtCore.QTimer.singleShot(0, lambda: _activate_pid(pid))
+
+    def _dismiss(self, d: Danmu):
+        if d in self.danmu:
+            self.danmu.remove(d)
+        self.hovered = None
+        self._set_click_through(True)          # 立即恢复穿透,别卡成隐形墙
+        self.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        self._repaint_band()
 
     def _interval_ok(self):
         return not self._settings_paused
@@ -396,6 +913,7 @@ class OverlayWindow(QtWidgets.QWidget):
     def _menu(self) -> QtWidgets.QMenu:
         m = QtWidgets.QMenu()
         m.addAction("继续" if getattr(self, "paused", False) else "暂停", self.toggle_pause)
+        m.addAction("显示弹幕" if self._hidden else "隐藏弹幕", self.toggle_hidden)
         m.addAction("清屏", self.clear)
         m.addSeparator()
         m.addAction("设置…", self.open_settings)
@@ -443,11 +961,45 @@ class OverlayWindow(QtWidgets.QWidget):
         self.paused = not self.paused
         self.tray.setContextMenu(self._menu())
 
+    def toggle_hidden(self):
+        """隐藏 = 整个弹幕层收起来、停止放新条。"""
+        self._hidden = not self._hidden
+        if self._fade is not None:
+            self._fade.stop()
+        anim = QtCore.QPropertyAnimation(self, b"windowOpacity", self)
+        anim.setDuration(220)
+        anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        if self._hidden:                      # 淡出后再真正隐藏
+            anim.setStartValue(self.windowOpacity())
+            anim.setEndValue(0.0)
+            anim.finished.connect(lambda: self._hidden and self.hide())
+        else:                                 # 先透明地显示出来,再淡入到设定的不透明度
+            self.setWindowOpacity(0.0)
+            self.show()
+            self.raise_()
+            self._apply_native()
+            anim.setStartValue(0.0)
+            anim.setEndValue(float(self.conf["opacity"]))
+        self._fade = anim
+        anim.start()
+        self.tray.setContextMenu(self._menu())
+
     def clear(self):
+        """清屏:每条整条往下坠、轻转、淡出,从左到右依次倒下,像推倒一排多米诺。"""
+        W = max(1, self.width())
+        for d in self.danmu:
+            dpr = d.pix.devicePixelRatio()
+            pw, ph = d.pix.width() / dpr, d.pix.height() / dpr
+            self.shards.append(_Shard(
+                d.pix, -pw / 2, -ph / 2, d.x - d.pad + pw / 2, d.y - d.pad_y + ph / 2,
+                vx=random.uniform(-0.6, 0.6), vy=random.uniform(-3.0, -1.0), va=random.uniform(-2.0, 2.0),
+                life=random.uniform(0.8, 1.0), r=math.hypot(pw, ph) / 2,
+                wait=max(0.0, min(d.x, W)) / W * 0.35))
         self.danmu.clear()
         self.pending.clear()
         self.hovered = None
-        self.update()
+        self._set_click_through(True)
+        self._repaint_band()
 
     # ---------- 设置 ----------
     def open_settings(self):
@@ -458,15 +1010,21 @@ class OverlayWindow(QtWidgets.QWidget):
         self._dlg = SettingsDialog(self.conf, list(self.seen_sources))
         self._dlg.applied.connect(self._apply_settings)
         self._dlg.show()
+        self._self_activated = time.monotonic()
+        _activate_app()
         self._dlg.raise_()
         self._dlg.activateWindow()
 
     def _apply_settings(self):
         cfg.save(self.conf)
         self._rebuild_font()
+        for d in self.danmu:                         # 在飞的也换上新字体/颜色/描边
+            self._render(d)
         self.setWindowOpacity(float(self.conf["opacity"]))
         # 出现节流是单次触发+按积压动态排期,间隔改动下一拍自动生效,无需 setInterval
         self.setGeometry(self._target_geometry())   # 显示器/区域切换实时生效
+        self._apply_native()                         # 换了几何后重设穿透
+        self.tray.setContextMenu(self._menu())
 
 
 # ===== 设置面板主题(经典配色板;仅影响设置窗外观,不改桌面弹幕) =====
@@ -579,7 +1137,8 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Bulletin · 弹讯设置")
         self.setMinimumWidth(880)
-        self.resize(940, 740)   # 一屏放下:左栏加了区域预览+两个开关后更高,窗口相应加高
+        avail = QtWidgets.QApplication.primaryScreen().availableGeometry().height()
+        self.resize(940, min(720, avail - 40))   # 屏幕矮时封顶,多出的靠滚动
         self._c = conf
         self._t = THEMES.get(conf.get("theme", "Tokyo Night"), THEMES["Tokyo Night"])
         self._titles: list = []
@@ -762,7 +1321,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.feeds = QtWidgets.QPlainTextEdit("\n".join(conf["feeds"]))
         self.feeds.setMinimumHeight(58)
-        self.feeds.setPlaceholderText("每行一个 RSS 链接;实时源见「实时·RSSHub」预设")
+        self.feeds.setPlaceholderText("每行一个 RSS 链接;用自建 RSSHub 时可写 {rsshub}/路由")
         self._row(g, "链接", self.feeds)
 
         self.probe_box = QtWidgets.QPlainTextEdit()
@@ -790,7 +1349,8 @@ class SettingsDialog(QtWidgets.QDialog):
         outer.addLayout(bottom)
 
     # ---------- 主题 ----------
-    def _qss(self, t):
+    @staticmethod
+    def _qss(t):
         return (
             f"QDialog,QScrollArea,QScrollArea>QWidget>QWidget{{background:{t['bg']};}}"
             f"QLabel{{color:{t['tx']};background:transparent;}}"

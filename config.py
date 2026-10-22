@@ -4,7 +4,7 @@ import os
 import sys
 
 APP_NAME = "Bulletin"
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 
 def _data_dir() -> str:
