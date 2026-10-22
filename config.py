@@ -36,9 +36,10 @@ def default_font_family() -> str:
     return "Noto Sans CJK SC"
 
 
-# 预设新闻源。"原生"= 直接 RSS,稳;"RSSHub"= 需可达的 RSSHub 实例(公共实例常被墙,建议自建)
+# 预设新闻源:只放发布方自己公开的 RSS。要接 RSSHub 路由,在设置里填你自己的实例并自行添加,
+# 能接哪些源取决于你的实例和各源自己的条款;产品不内置抓取类路由。
 PRESETS = {
-    "科技中文(原生)": [
+    "科技": [
         "https://www.ithome.com/rss/",
         "https://www.cnbeta.com.tw/backend.php",
         "https://sspai.com/feed",
@@ -52,11 +53,15 @@ PRESETS = {
         "https://www.theverge.com/rss/index.xml",
         "http://feeds.bbci.co.uk/news/world/rss.xml",
     ],
-    "实时·RSSHub": [
-        "{rsshub}/cls/telegraph",      # 财联社电报(秒级)
-        "{rsshub}/wallstreetcn/live",  # 华尔街见闻快讯
-        "{rsshub}/weibo/search/hot",   # 微博热搜
-        "{rsshub}/zhihu/daily",        # 知乎日报
+    "美股": [
+        "https://feeds.content.dowjones.io/public/rss/mw_topstories",   # MarketWatch
+        "https://www.cnbc.com/id/100003114/device/rss/rss.html",        # CNBC 头条
+    ],
+    "币圈": [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://cointelegraph.com/rss",
+        "https://www.theblock.co/rss.xml",
+        "https://decrypt.co/feed",
     ],
 }
 # feeds 里的 {rsshub} 会被替换成 rsshub_base(自建实例填这个)
@@ -101,7 +106,7 @@ DEFAULTS = {
     # 其它(下一批实现)
     "autostart": False,
     "pause_on_fullscreen": True,
-    "feeds": list(PRESETS["科技中文(原生)"]) + list(PRESETS["财经"]),
+    "feeds": list(PRESETS["科技"]) + list(PRESETS["财经"]),
 }
 
 

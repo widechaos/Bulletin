@@ -1,6 +1,6 @@
 """新闻源:RSS/RSSHub 实时流。
 
-设计目标 = 财联社电报那种「实时跟踪」,不是把一堆旧闻一股脑倒出来:
+设计目标 = 7×24 快讯那种「实时跟踪」,不是把一堆旧闻一股脑倒出来:
 - 持久去重(.seen.json):重启不重复放旧闻
 - 启动只放最新 primer_count 条打底,其余旧闻标记已读但不显示
 - 之后高频轮询,只把「新出现的」条目实时放出
@@ -41,6 +41,9 @@ def _clean(text: str) -> str:
 def resolve_url(url: str, rsshub_base: str) -> str:
     """把 feed 里的 {rsshub} 占位替换成实际 RSSHub 基址(自建实例)。"""
     return (url or "").replace("{rsshub}", (rsshub_base or "").rstrip("/"))
+
+
+PUBLIC_RSSHUB = {"rsshub.app"}
 
 
 def _host(url: str) -> str:
@@ -85,7 +88,8 @@ def fetch_parse(url: str, rsshub_base: str, validators: FeedValidators | None = 
         headers["Authorization"] = "Basic " + base64.b64encode(userinfo.encode()).decode()
         netloc = hostonly
     clean = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
-    insecure = bool(rsshub_base) and _host(url) == _host(rsshub_base)
+    # 只对自填的自建实例放宽;默认的公共 rsshub.app 照常校验证书
+    insecure = bool(rsshub_base) and _host(url) == _host(rsshub_base) and _host(rsshub_base) not in PUBLIC_RSSHUB
     ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     req = urllib.request.Request(clean, headers=headers)
     try:
