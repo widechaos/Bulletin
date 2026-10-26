@@ -150,6 +150,7 @@ class NewsItem:
     url: str
     source: str
     ts: float = 0.0     # 发布时间(epoch 秒);0 = 未知
+    alert: bool = False  # 命中关注词
 
 
 class RSSPoller(threading.Thread):

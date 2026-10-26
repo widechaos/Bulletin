@@ -4,7 +4,7 @@ import os
 import sys
 
 APP_NAME = "Bulletin"
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def _data_dir() -> str:
@@ -81,7 +81,7 @@ DEFAULTS = {
     "top_fraction": 0.55,
     "max_on_screen": 60,
     "display": "primary",       # primary | span(横贯全部) | 某个屏幕名
-    "theme": "Tokyo Night",     # 设置面板主题(见 overlay.THEMES);仅影响设置窗外观
+    "theme": "浅色",            # 设置面板主题(见 overlay.THEMES);仅影响设置窗外观
     "rsshub_base": "https://rsshub.app",   # 自建 RSSHub 填这里(如 https://你的域名);feeds 里 {rsshub} 会替换成它
     # 实时性
     "poll_interval": 120,
@@ -103,7 +103,12 @@ DEFAULTS = {
     "muted_sources": [],        # 关掉的新闻源(按来源开关)
     "only_keywords": [],        # 白名单关键词
     "only_enabled": False,      # 启用白名单(只看含这些词的)
-    # 其它(下一批实现)
+    # 关注词提醒(社区版 1 个)
+    "alert_keywords": [],
+    "alert_sound": True,        # 命中时提示音
+    "alert_notify": True,       # 弹幕暂停/隐藏/全屏时命中,改发系统通知
+    "onboarded": False,         # 首次启动引导走过没有;老配置升级时直接视为走过
+    # 其它
     "autostart": False,
     "pause_on_fullscreen": True,
     "feeds": list(PRESETS["科技"]) + list(PRESETS["财经"]),
@@ -115,9 +120,17 @@ def load() -> dict:
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
+                old = json.load(f)
         except (json.JSONDecodeError, OSError):
-            pass
+            old = {}
+        old.setdefault("onboarded", True)            # 老用户不再弹首次引导
+        if "theme_v2" not in old:                    # 旧默认深色主题一次性迁到浅色;自己选过别的不动
+            if old.get("theme", "Tokyo Night") == "Tokyo Night":
+                old["theme"] = "浅色"
+            old["theme_v2"] = True
+        cfg.update(old)
+    else:
+        cfg["theme_v2"] = True
     for k, v in DEFAULTS.items():
         cfg.setdefault(k, v)
     if not cfg.get("font_family"):

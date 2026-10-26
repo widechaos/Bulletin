@@ -5,12 +5,13 @@ RSS/RSSHub 新闻源 → 弹幕直接飞在桌面上(全透明、不挡其它程
 """
 import queue
 import sys
+import time
 
 from PySide6 import QtWidgets
 
 import config as cfg
-from overlay import OverlayWindow
-from sources import RSSPoller
+from overlay import THEMES, OverlayWindow, SettingsDialog, _activate_app
+from sources import NewsItem, RSSPoller
 
 
 def _macos_accessory_mode():
@@ -45,7 +46,15 @@ def main():
     app.setQuitOnLastWindowClosed(False)   # 无主窗口,退出走托盘菜单
     _macos_accessory_mode()
 
+    welcome = []
+    if not conf.get("onboarded"):          # 新装:先选源和关注词,再开始抓
+        import onboarding
+        _activate_app()
+        welcome = onboarding.run(conf, SettingsDialog._qss(THEMES["浅色"]))
+
     item_q: "queue.Queue" = queue.Queue()
+    for title in welcome:
+        item_q.put(NewsItem(title=title, url="", source="Bulletin", ts=time.time()))
     poller = RSSPoller(conf, item_q)   # 实时流:启动只放最新几条打底,之后只放新条
     poller.start()
 

@@ -26,6 +26,7 @@ import config as cfg
 from danmaku import Danmu
 from sources import probe_feed, resolve_url
 
+PRO_URL = "https://widechaos.cn/bulletin/pro"
 SPAWN_GAP = 60   # 同泳道两条之间最小水平间隔(px)
 FRAME = 1 / 60   # 速度单位:px/帧(按 60fps 计),实际按真实间隔折算
 GRAVITY = 0.32   # 碎片重力(px/帧²)
@@ -149,6 +150,18 @@ def _activate_pid(pid: int):
         _objc_fn(ctypes.c_bool, ctypes.c_ulong)(ra, sel(b"activateWithOptions:"), 0)
 
 
+def _beep():
+    if sys.platform == "darwin":
+        import subprocess
+        subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif sys.platform.startswith("win"):
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    else:
+        QtWidgets.QApplication.beep()
+
+
 def rel_time(ts: float) -> str:
     """近的→相对(刚刚/几分钟前/几小时前),远的→详细时间。"""
     if not ts:
@@ -194,6 +207,8 @@ class OverlayWindow(QtWidgets.QWidget):
         self._flow = 1.0                    # 流速系数:暂停/恢复时在 0↔1 间缓动,不是一下刹死
         self._hover_since = 0.0             # 悬停光晕淡入计时
         self._fade: QtCore.QPropertyAnimation | None = None
+        self._last_beep = 0.0
+        self._notify_url = ""
 
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
@@ -318,6 +333,9 @@ class OverlayWindow(QtWidgets.QWidget):
         self._badge_font.setWeight(QtGui.QFont.Weight.DemiBold)
         self._badge_sub = QtGui.QFont(fam)
         self._badge_sub.setPixelSize(px - 2)
+        self._alert_font = QtGui.QFont(self._font)
+        self._alert_font.setPointSizeF(self._font.pointSizeF() * 1.12)
+        self._alert_fm = QtGui.QFontMetrics(self._alert_font)
 
     def _lane_h(self) -> int:
         return self._fm.height() + 10
@@ -330,6 +348,9 @@ class OverlayWindow(QtWidgets.QWidget):
 
     # ---------- 生成 ----------
     def _drain_queue(self):
+        """收新条目;命中关注词的插队到最前,并按需响铃/发通知。社区版只认第 1 个关注词。"""
+        words = [w.strip() for w in self.conf.get("alert_keywords", [])[:1] if w.strip()]
+        kw = words[0].lower() if words else ""
         while True:
             try:
                 item = self.q.get_nowait()
@@ -337,7 +358,23 @@ class OverlayWindow(QtWidgets.QWidget):
                 break
             if item.source not in self.seen_sources:   # 供设置里「按来源开关」列出
                 self.seen_sources.append(item.source)
-            self.pending.append(item)
+            item.alert = bool(kw) and kw in item.title.lower()
+            if item.alert:
+                self.pending.appendleft(item)
+                self._on_alert(item)
+            else:
+                self.pending.append(item)
+
+    def _on_alert(self, item):
+        if self.conf.get("alert_sound", True) and time.monotonic() - self._last_beep > 3:
+            self._last_beep = time.monotonic()
+            try:
+                _beep()
+            except Exception:
+                pass
+        if self.conf.get("alert_notify", True) and not self._visible_now():
+            self._notify_url = item.url
+            self.tray.showMessage(f"命中关注词 · {item.source}", item.title, self.tray.icon(), 8000)
 
     def _visible_now(self) -> bool:
         return not (self.paused or self._fs_paused or self._hidden)
@@ -374,8 +411,8 @@ class OverlayWindow(QtWidgets.QWidget):
             item = self.pending.popleft()
             if item.source in muted:
                 continue
-            if only_on and only and not any(k in item.title.lower() for k in only):
-                continue
+            if only_on and only and not item.alert and not any(k in item.title.lower() for k in only):
+                continue   # 白名单不拦关注词
             return item
         return None
 
@@ -391,7 +428,9 @@ class OverlayWindow(QtWidgets.QWidget):
         usable = int(H * float(self.conf["top_fraction"]))
         lanes = max(1, usable // lh)
 
-        for ln in random.sample(range(lanes), lanes):
+        order = random.sample(range(lanes), lanes)
+        order.sort(key=lambda ln: bool(getattr(self._lane_last(ln, band_top, lh), "alert", False)))
+        for ln in order:   # 慢速的关注词泳道排最后,别把后面的都拖慢
             last = self._lane_last(ln, band_top, lh)
             if last is not None and (last.x + last.w) >= W - SPAWN_GAP:
                 continue
@@ -408,11 +447,12 @@ class OverlayWindow(QtWidgets.QWidget):
     def _make_danmu(self, item, y, last, W):
         d = Danmu(text=item.title, url=item.url, source=item.source, source_color=self._color_for(item.source),
                   x=float(W), y=int(y), time_str=(rel_time(item.ts) + "  ") if (
-                      self.conf.get("show_time", True) and item.ts) else "")
+                      self.conf.get("show_time", True) and item.ts) else "",
+                  alert=bool(getattr(item, "alert", False)))
         self._render(d)
         base = float(self.conf["speed"])
-        speed = base
-        if self.conf.get("adaptive_speed", False):
+        speed = base * 0.65 if d.alert else base     # 命中的放慢,多看一眼
+        if self.conf.get("adaptive_speed", False) and not d.alert:
             factor = 1.0 + min(0.6, (d.w / max(W, 1)) * 0.8)
             speed = min(base * factor, float(self.conf.get("adaptive_max_speed", 4.0)))
         if last is not None:                 # 不超车,防重叠
@@ -422,44 +462,60 @@ class OverlayWindow(QtWidgets.QWidget):
 
     def _render(self, d: Danmu):
         """把整条弹幕(描边+来源色+时间+正文)画进一张透明图。
-        原来每帧每条要 drawText 9 次以上,现在生成时画一次,之后每帧只贴图;击碎也直接切这张图。"""
-        fm = self._fm
+        原来每帧每条要 drawText 9 次以上,现在生成时画一次,之后每帧只贴图;击碎也直接切这张图。
+        命中关注词的:字大 12%,外面一个红色圆角底,文字改白。"""
+        alert = d.alert
+        fm = self._alert_fm if alert else self._fm
         tag = f"[{d.source}]  " if self.conf.get("show_source_tag", True) else ""
         d.tag_w = fm.horizontalAdvance(tag)
         d.time_w = fm.horizontalAdvance(d.time_str)
-        d.w = d.tag_w + d.time_w + fm.horizontalAdvance(d.text)
-        d.h = fm.height()
+        ip, vp = (10, 3) if alert else (0, 0)           # 红底的内边距
+        d.w = d.tag_w + d.time_w + fm.horizontalAdvance(d.text) + 2 * ip
+        d.h = self._fm.height()                         # 泳道按普通字高算,命中条上下各溢出一点
         ol = int(self.conf.get("outline", 2))
-        d.pad = d.pad_y = pad = ol + 2
+        d.pad = pad = ol + 2
+        d.pad_y = pad + vp + (fm.height() - d.h) // 2
         dpr = self.devicePixelRatioF()
-        pix = QtGui.QPixmap(math.ceil((d.w + 2 * pad) * dpr), math.ceil((d.h + 2 * pad) * dpr))
+        ph = fm.height() + 2 * vp + 2 * pad
+        pix = QtGui.QPixmap(math.ceil((d.w + 2 * pad) * dpr), math.ceil(ph * dpr))
         pix.setDevicePixelRatio(dpr)
         pix.fill(QtCore.Qt.GlobalColor.transparent)
         p = QtGui.QPainter(pix)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing, True)
-        p.setFont(self._font)
-        x, base = pad, pad + fm.ascent()
+        if alert:
+            r = QtCore.QRectF(pad, pad, d.w, fm.height() + 2 * vp)
+            g = QtGui.QLinearGradient(r.topLeft(), r.bottomLeft())
+            g.setColorAt(0, QtGui.QColor(232, 52, 52, 215))
+            g.setColorAt(1, QtGui.QColor(176, 24, 30, 215))
+            p.setBrush(QtGui.QBrush(g))
+            p.setPen(QtGui.QPen(QtGui.QColor(255, 150, 140, 230), 1.4))
+            p.drawRoundedRect(r, r.height() / 2.6, r.height() / 2.6)
+        p.setFont(self._alert_font if alert else self._font)
+        x, base = pad + ip, pad + vp + fm.ascent()
         full = tag + d.time_str + d.text
         # 描边:八向黑边,强度=outline(0 时退化为单像素投影),保证任何背景上都清晰
-        if ol > 0:
+        if ol > 0 and not alert:
             p.setPen(QtGui.QColor(0, 0, 0, 235))
             for dx, dy in _RING:
                 p.drawText(x + dx * ol, base + dy * ol, full)
-        else:
-            p.setPen(QtGui.QColor(0, 0, 0, 200))
+        else:                                           # 红底上不用粗黑边,轻投影就够
+            p.setPen(QtGui.QColor(0, 0, 0, 160 if alert else 200))
             p.drawText(x + 1, base + 1, full)
         # 分段上色:来源色 → 时间灰 → 正文
         if tag:
-            p.setPen(QtGui.QColor(d.source_color))
+            p.setPen(QtGui.QColor("#FFE3E0") if alert else QtGui.QColor(d.source_color))
             p.drawText(x, base, tag)
             x += d.tag_w
         if d.time_str:
-            p.setPen(QtGui.QColor("#93A2B4"))
+            p.setPen(QtGui.QColor("#FFD0CB") if alert else QtGui.QColor("#93A2B4"))
             p.drawText(x, base, d.time_str)
             x += d.time_w
         colorful = self.conf.get("colorful", False)
-        p.setPen(QtGui.QColor(d.source_color) if colorful else QtGui.QColor(self.conf["font_color"]))
+        if alert:
+            p.setPen(QtGui.QColor("#FFFFFF"))
+        else:
+            p.setPen(QtGui.QColor(d.source_color) if colorful else QtGui.QColor(self.conf["font_color"]))
         p.drawText(x, base, d.text)
         p.end()
         d.pix = pix
@@ -648,7 +704,7 @@ class OverlayWindow(QtWidgets.QWidget):
             if d is self.hovered:
                 self._paint_halo(p, d, x, min(1.0, (now - self._hover_since) / 0.18))
             p.drawPixmap(x - d.pad, d.y - d.pad_y, d.pix)
-            if d is self.hovered and d.url and self._link_mode:
+            if d is self.hovered and d.url and self._link_mode and not d.alert:
                 ul = d.y + self._fm.ascent() + 3
                 p.setPen(QtGui.QPen(QtGui.QColor(d.source_color), 1))
                 p.drawLine(x, ul, x + d.w, ul)
@@ -934,6 +990,7 @@ class OverlayWindow(QtWidgets.QWidget):
         self.tray = QtWidgets.QSystemTrayIcon(self._tray_icon(), self)
         self.tray.setToolTip(f"Bulletin 弹讯 v{cfg.__version__} · 桌面弹幕新闻")
         self.tray.setContextMenu(self._menu())
+        self.tray.messageClicked.connect(self._on_notify_clicked)
         self.tray.show()
         self.update_found.connect(self._on_update_found)
         self._check_update_async()   # 启动后台静默检查一次
@@ -957,12 +1014,17 @@ class OverlayWindow(QtWidgets.QWidget):
         if self._update_url:
             webbrowser.open(self._update_url)
 
+    def _on_notify_clicked(self):
+        self._self_activated = time.monotonic()
+        if self._notify_url:
+            webbrowser.open(self._notify_url)
+
     def toggle_pause(self):
         self.paused = not self.paused
         self.tray.setContextMenu(self._menu())
 
     def toggle_hidden(self):
-        """隐藏 = 整个弹幕层收起来、停止放新条。"""
+        """隐藏 = 整个弹幕层收起来、停止放新条;关注词照样提醒(发通知)。"""
         self._hidden = not self._hidden
         if self._fade is not None:
             self._fade.stop()
@@ -1031,6 +1093,9 @@ class OverlayWindow(QtWidgets.QWidget):
 # 每套:bg 底 / card 卡片 / bd 边框 / inp 输入框 / tx 文字 / mut 次要文字 /
 #       ti 分区标题 / fill 滑块与聚焦 / hd 滑块把手 / on 开关开启色 / vlab 数值
 THEMES = {
+    "浅色":             {"bg": "#F5F5F7", "card": "#FFFFFF", "bd": "#D9D9DE", "inp": "#FFFFFF",
+                         "tx": "#1D1D1F", "mut": "#6E6E73", "ti": "#0A66D8", "fill": "#0A84FF",
+                         "hd": "#FFFFFF", "on": "#34C759", "vlab": "#0A66D8"},
     "Tokyo Night":      {"bg": "#1A1B26", "card": "#24283B", "bd": "#2F334D", "inp": "#16161E",
                          "tx": "#C0CAF5", "mut": "#7982A9", "ti": "#7AA2F7", "fill": "#7AA2F7",
                          "hd": "#C0CAF5", "on": "#50FA7B", "vlab": "#7AA2F7"},
@@ -1067,6 +1132,8 @@ class ToggleSwitch(QtWidgets.QAbstractButton):
         t = self._owner._t
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+        if not self.isEnabled():
+            p.setOpacity(0.4)                  # 会员功能没激活:淡一点,一眼看出点不动
         on = self.isChecked()
         r = QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         p.setPen(QtCore.Qt.PenStyle.NoPen)
@@ -1126,6 +1193,79 @@ class AreaPreview(QtWidgets.QWidget):
         p.end()
 
 
+class KeywordList(QtWidgets.QWidget):
+    """关注词:一行一个,能看到配了几个。免费版限 1 个;会员不限,一行里可用 | 写别名。"""
+
+    def __init__(self, words, pro: bool):
+        super().__init__()
+        self._pro = pro
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+        self.list = QtWidgets.QListWidget()
+        self.list.setFixedHeight(96)
+        self.list.addItems([w for w in words if str(w).strip()])
+        v.addWidget(self.list)
+        row = QtWidgets.QHBoxLayout()
+        self.edit = QtWidgets.QLineEdit()
+        self.edit.returnPressed.connect(self._add)
+        self.add_btn = QtWidgets.QPushButton("添加")
+        self.add_btn.clicked.connect(self._add)
+        self.del_btn = QtWidgets.QPushButton("删除")
+        self.del_btn.clicked.connect(self._remove)
+        row.addWidget(self.edit, 1)
+        row.addWidget(self.add_btn)
+        row.addWidget(self.del_btn)
+        v.addLayout(row)
+        self.count = QtWidgets.QLabel()
+        self.count.setWordWrap(True)
+        v.addWidget(self.count)
+        self.set_pro(pro)
+
+    def set_pro(self, pro: bool):
+        self._pro = pro
+        self.edit.setPlaceholderText("股票名、代码或关键词;别名用 | 连,如 贵州茅台|600519" if pro else "填一个关键词,如 降准")
+        self._refresh()
+
+    def _refresh(self):
+        n = self.list.count()
+        full = not self._pro and n >= 1
+        self.edit.setEnabled(not full)
+        self.add_btn.setEnabled(not full)
+        if self._pro:
+            self.count.setText(f"已配置 {n} 个关注词")
+        elif n > 1:
+            self.count.setText(f"已配置 {n} 个;免费版只生效第 1 个,激活会员后全部生效")
+        else:
+            self.count.setText(f"已配置 {n} 个 · 免费版限 1 个,会员不限个数、支持别名和代码整词匹配")
+
+    def _add(self):
+        parts = [w.strip() for w in self.edit.text().replace("，", ",").split(",") if w.strip()]
+        have = {self.list.item(i).text() for i in range(self.list.count())}
+        for w in parts:
+            if not self._pro and self.list.count() >= 1:
+                break
+            if w not in have:
+                self.list.addItem(w)
+                have.add(w)
+        self.edit.clear()
+        self._refresh()
+
+    def _remove(self):
+        for it in self.list.selectedItems() or ([self.list.item(self.list.count() - 1)] if self.list.count() else []):
+            self.list.takeItem(self.list.row(it))
+        self._refresh()
+
+    def keyPressEvent(self, e):
+        if e.key() in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace) and self.list.hasFocus():
+            self._remove()
+        else:
+            super().keyPressEvent(e)
+
+    def values(self) -> list:
+        return [self.list.item(i).text() for i in range(self.list.count())]
+
+
 class SettingsDialog(QtWidgets.QDialog):
     applied = QtCore.Signal()
     probe_sig = QtCore.Signal(str)
@@ -1138,9 +1278,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setWindowTitle("Bulletin · 弹讯设置")
         self.setMinimumWidth(880)
         avail = QtWidgets.QApplication.primaryScreen().availableGeometry().height()
-        self.resize(940, min(720, avail - 40))   # 屏幕矮时封顶,多出的靠滚动
+        self.resize(940, min(900, avail - 40))   # 屏幕矮时封顶,多出的靠滚动
         self._c = conf
-        self._t = THEMES.get(conf.get("theme", "Tokyo Night"), THEMES["Tokyo Night"])
+        self._t = THEMES.get(conf.get("theme", "浅色"), THEMES["浅色"])
+        self._tags: list = []
         self._titles: list = []
         self._rlabels: list = []
         self._vlabels: list = []
@@ -1171,7 +1312,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.theme_combo = QtWidgets.QComboBox()
         for name in THEMES:
             self.theme_combo.addItem(name)
-        self.theme_combo.setCurrentText(conf.get("theme", "Tokyo Night"))
+        self.theme_combo.setCurrentText(conf.get("theme", "浅色"))
         self.theme_combo.currentTextChanged.connect(self._apply_theme)
         trow.addWidget(tlab)
         trow.addWidget(self.theme_combo, 1)
@@ -1204,6 +1345,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self._previews.append(self._area_prev)
         self.area.valueChanged.connect(lambda v: self._area_prev.setFraction(v / 100.0))
         self._row(g, "区域预览", self._area_prev)
+        pos = QtWidgets.QComboBox()
+        pos.addItem("顶部")
+        pos.setEnabled(False)
+        self._row(g, "位置", self._pro_teaser(pos, "会员版可把弹幕带放在屏幕顶部、居中或底部"))
         self.opacity = self._slider_row(g, "不透明度", 20, 100, float(conf["opacity"]) * 100, lambda v: f"{v}%")
         self.size = self._slider_row(g, "字号", 12, 80, int(conf["font_size"]), lambda v: f"{v}px")
         self.speed = self._slider_row(g, "速度", 5, 90, float(conf["speed"]) * 10, _speed_lbl)
@@ -1260,6 +1405,25 @@ class SettingsDialog(QtWidgets.QDialog):
         for i, w in enumerate((w1, w2, w3, w4, w5, w6)):
             tg.addWidget(w, i // 2, i % 2)
         self._row(g, "", tg)
+
+        # ============ 右栏:关注词提醒 ============
+        g = self._card("关注词提醒", self._colR)
+        self.alert_kw = KeywordList(conf.get("alert_keywords", []), False)
+        self._row(g, "关注词", self.alert_kw)
+        ag = QtWidgets.QGridLayout()
+        ag.setHorizontalSpacing(24)
+        a1, self.alert_sound = self._toggle_cell("提示音", conf.get("alert_sound", True))
+        a2, self.alert_notify = self._toggle_cell("暂停时通知", conf.get("alert_notify", True))
+        ag.addWidget(a1, 0, 0)
+        ag.addWidget(a2, 0, 1)
+        self._row(g, "", ag)
+        tg2 = QtWidgets.QGridLayout()
+        tg2.setHorizontalSpacing(24)
+        for i, name in enumerate(("总是通知", "只放命中")):
+            cell, sw = self._toggle_cell(name, False)
+            sw.setEnabled(False)
+            tg2.addWidget(cell, 0, i)
+        self._row(g, "", self._pro_teaser(tg2, "会员版:弹幕在放时命中也发通知,或只放命中关注词的快讯"))
 
         # ============ 右栏:过滤 ============
         g = self._card("过滤", self._colR)
@@ -1332,6 +1496,17 @@ class SettingsDialog(QtWidgets.QDialog):
         self.probe_done.connect(lambda: self.detect_btn.setEnabled(True))
         self._row(g, "检测", self.probe_box)
 
+        # ============ 左栏:会员版功能 ============
+        g = self._card("会员版功能", self._colL)
+        promo = QtWidgets.QLabel(
+            "关注词不限个数,支持别名与股票代码整词匹配 · 同事件合并 · "
+            "回看与收藏 · 共享屏幕时隐藏 · 全局快捷键 · 弹幕放在顶部、居中或底部<br>"
+            f'<a href="{PRO_URL}">了解会员版 ↗</a>')
+        promo.setWordWrap(True)
+        promo.setOpenExternalLinks(True)
+        self._tlabels.append(promo)
+        self._row(g, "", promo)
+
         self._colL.addStretch(1)
         self._colR.addStretch(1)
 
@@ -1367,6 +1542,12 @@ class SettingsDialog(QtWidgets.QDialog):
             f"QSlider::sub-page:horizontal{{background:{t['fill']};border-radius:3px;}}"
             f"QSlider::handle:horizontal{{width:15px;height:15px;margin:-5px 0;background:{t['hd']};"
             f"border:2px solid {t['fill']};border-radius:8px;}}"
+            f"QListWidget{{background:{t['inp']};color:{t['tx']};border:1px solid {t['bd']};border-radius:6px;}}"
+            "QListWidget::item{padding:3px 6px;}"
+            f"QListWidget::item:selected{{background:{t['bd']};color:{t['tx']};}}"
+            f"QLabel#proTag{{color:{t['fill']};border:1px solid {t['fill']};border-radius:8px;"
+            "padding:0 6px;font-size:11px;}"
+            f"QWidget:disabled{{color:{t['mut']};}}"
         )
 
     def _apply_theme(self, name):
@@ -1387,6 +1568,21 @@ class SettingsDialog(QtWidgets.QDialog):
             sw.update()
         for pv in self._previews:
             pv.update()
+
+    def _pro_teaser(self, widget_or_layout, tip: str):
+        """会员功能的预览:控件置灰,后面挂「会员」小标签,点开会员页。"""
+        row = QtWidgets.QHBoxLayout()
+        if isinstance(widget_or_layout, QtWidgets.QLayout):
+            row.addLayout(widget_or_layout, 1)
+        else:
+            row.addWidget(widget_or_layout, 1)
+        tag = QtWidgets.QLabel(f'<a href="{PRO_URL}" style="text-decoration:none;color:{self._t["fill"]}">会员</a>')
+        tag.setObjectName("proTag")
+        tag.setOpenExternalLinks(True)
+        tag.setToolTip(tip + "。点击了解会员版。")
+        row.addSpacing(8)
+        row.addWidget(tag)
+        return row
 
     # ---------- 布局小工具 ----------
     def _card(self, title, col):
@@ -1475,6 +1671,9 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _save(self):
         c = self._c
+        c["alert_keywords"] = self.alert_kw.values()[:1]
+        c["alert_sound"] = self.alert_sound.isChecked()
+        c["alert_notify"] = self.alert_notify.isChecked()
         c["font_size"] = self.size.value()
         c["font_color"] = self.color
         c["font_family"] = self.family.currentText()

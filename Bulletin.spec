@@ -10,7 +10,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=['updater', 'fullscreen', 'autostart'],   # 延迟/间接导入,显式声明防漏
+    hiddenimports=['updater', 'fullscreen', 'autostart', 'onboarding'],   # 延迟/间接导入,显式声明防漏
     hookspath=[],
     runtime_hooks=[],
     excludes=['tkinter', 'PySide6.QtQml', 'PySide6.QtQuick', 'PySide6.Qt3DCore',
@@ -41,8 +41,8 @@ if sys.platform == 'darwin':
         bundle_identifier='cn.widechaos.bulletin',
         info_plist={
             'LSUIElement': True,                    # 菜单栏 agent,不占 Dock
-            'CFBundleShortVersionString': '0.2.0',
-            'CFBundleVersion': '0.2.0',
+            'CFBundleShortVersionString': '0.3.0',
+            'CFBundleVersion': '0.3.0',
             'NSHighResolutionCapable': True,
         },
     )

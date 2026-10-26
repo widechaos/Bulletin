@@ -21,4 +21,5 @@ class Danmu:
     paused: bool = False
     pix: object = field(default=None, repr=False)    # 预渲染的整条图(含描边),每帧只贴图
     pad: int = 0            # pix 左右为描边留的边距
-    pad_y: int = 0          # pix 上方超出泳道顶的距离
+    pad_y: int = 0          # pix 上方超出泳道顶的距离(命中条更高,上下各溢出一点)
+    alert: bool = False     # 命中关注词:红底、略大、放慢
