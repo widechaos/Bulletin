@@ -41,8 +41,8 @@ if sys.platform == 'darwin':
         bundle_identifier='cn.widechaos.bulletin',
         info_plist={
             'LSUIElement': True,                    # 菜单栏 agent,不占 Dock
-            'CFBundleShortVersionString': '0.3.5',
-            'CFBundleVersion': '0.3.5',
+            'CFBundleShortVersionString': '0.3.6',
+            'CFBundleVersion': '0.3.6',
             'NSHighResolutionCapable': True,
         },
     )
