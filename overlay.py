@@ -348,7 +348,7 @@ class OverlayWindow(QtWidgets.QWidget):
 
     # ---------- 生成 ----------
     def _drain_queue(self):
-        """收新条目;命中关注词的插队到最前,并按需响铃/发通知。社区版只认第 1 个关注词。"""
+        """收新条目;标题或摘要命中关注词的插队到最前,并按需响铃/发通知。社区版只认第 1 个关注词。"""
         words = [w.strip() for w in self.conf.get("alert_keywords", [])[:1] if w.strip()]
         kw = words[0].lower() if words else ""
         while True:
@@ -358,7 +358,7 @@ class OverlayWindow(QtWidgets.QWidget):
                 break
             if item.source not in self.seen_sources:   # 供设置里「按来源开关」列出
                 self.seen_sources.append(item.source)
-            item.alert = bool(kw) and kw in item.title.lower()
+            item.alert = bool(kw) and kw in f"{item.title}\n{item.desc}".lower()
             if item.alert:
                 self.pending.appendleft(item)
                 self._on_alert(item)
@@ -1124,6 +1124,7 @@ class ToggleSwitch(QtWidgets.QAbstractButton):
         super().__init__(parent)
         self._owner = owner
         self.setCheckable(True)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.setChecked(bool(checked))
         self.setFixedSize(42, 23)
         self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -1143,6 +1144,10 @@ class ToggleSwitch(QtWidgets.QAbstractButton):
         cx = (r.right() - d - 3) if on else (r.left() + 3)
         p.setBrush(QtGui.QColor(t["hd"]))
         p.drawEllipse(QtCore.QRectF(cx, r.top() + 3, d, d))
+        if self.hasFocus():
+            p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.setPen(QtGui.QPen(QtGui.QColor(t["ti"]), 2))
+            p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10)
         p.end()
 
 
@@ -1193,29 +1198,121 @@ class AreaPreview(QtWidgets.QWidget):
         p.end()
 
 
+class KeywordFlow(QtWidgets.QLayout):
+    """Lay out removable keywords in rows, sized to the available width."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(6)
+
+    def addItem(self, item):
+        self._items.append(item)
+        self.invalidate()
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < self.count() else None
+
+    def takeAt(self, index):
+        if 0 <= index < self.count():
+            item = self._items.pop(index)
+            self.invalidate()
+            return item
+        return None
+
+    def expandingDirections(self):
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._arrange(QtCore.QRect(0, 0, width, 0), False)
+
+    def minimumSize(self):
+        return QtCore.QSize(0, 32 if self.count() else 0)
+
+    def sizeHint(self):
+        return QtCore.QSize(300, self.heightForWidth(300))
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._arrange(rect, True)
+
+    def _arrange(self, rect, apply):
+        x, y, row_height = rect.x(), rect.y(), 0
+        width = max(1, rect.width())
+        for item in self._items:
+            hint = item.sizeHint()
+            w, h = min(width, hint.width()), hint.height()
+            if x > rect.x() and x + w > rect.x() + width:
+                x, y, row_height = rect.x(), y + row_height + self.spacing(), 0
+            if apply:
+                item.setGeometry(QtCore.QRect(x, y, w, h))
+            x += w + self.spacing()
+            row_height = max(row_height, h)
+        return y - rect.y() + row_height
+
+
+class KeywordChip(QtWidgets.QFrame):
+    def __init__(self, word, remove):
+        super().__init__()
+        self.word = word
+        self.setObjectName("keywordChip")
+        self.setToolTip(word)
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(10, 2, 4, 2)
+        layout.setSpacing(4)
+        self.label = QtWidgets.QLabel(word)
+        self.label.setMinimumWidth(0)
+        self.label.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.label, 1)
+        self.remove_btn = QtWidgets.QToolButton()
+        self.remove_btn.setObjectName("removeKeyword")
+        self.remove_btn.setText("×")
+        self.remove_btn.setFixedSize(24, 24)
+        self.remove_btn.setAccessibleName(f"删除关注词 {word}")
+        self.remove_btn.setToolTip(f"删除 {word}")
+        self.remove_btn.clicked.connect(lambda: remove(word))
+        layout.addWidget(self.remove_btn)
+
+    def sizeHint(self):
+        return QtCore.QSize(min(300, self.label.fontMetrics().horizontalAdvance(self.word) + 52), 32)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.label.setText(self.label.fontMetrics().elidedText(
+            self.word, QtCore.Qt.TextElideMode.ElideRight, max(0, self.width() - 42)))
+
+
 class KeywordList(QtWidgets.QWidget):
-    """关注词:一行一个,能看到配了几个。免费版限 1 个;会员不限,一行里可用 | 写别名。"""
+    """Compact removable keywords; free edition accepts one keyword."""
+
+    changed = QtCore.Signal()
 
     def __init__(self, words, pro: bool):
         super().__init__()
         self._pro = pro
+        self._words = list(dict.fromkeys(str(w).strip() for w in words if str(w).strip()))
         v = QtWidgets.QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(6)
-        self.list = QtWidgets.QListWidget()
-        self.list.setFixedHeight(96)
-        self.list.addItems([w for w in words if str(w).strip()])
-        v.addWidget(self.list)
+        v.setSpacing(8)
+        self.chips = QtWidgets.QWidget()
+        self.chips.setAccessibleName("已添加的关注词")
+        self.flow = KeywordFlow(self.chips)
+        v.addWidget(self.chips)
         row = QtWidgets.QHBoxLayout()
         self.edit = QtWidgets.QLineEdit()
+        self.edit.setAccessibleName("新关注词")
         self.edit.returnPressed.connect(self._add)
         self.add_btn = QtWidgets.QPushButton("添加")
         self.add_btn.clicked.connect(self._add)
-        self.del_btn = QtWidgets.QPushButton("删除")
-        self.del_btn.clicked.connect(self._remove)
         row.addWidget(self.edit, 1)
         row.addWidget(self.add_btn)
-        row.addWidget(self.del_btn)
         v.addLayout(row)
         self.count = QtWidgets.QLabel()
         self.count.setWordWrap(True)
@@ -1224,11 +1321,19 @@ class KeywordList(QtWidgets.QWidget):
 
     def set_pro(self, pro: bool):
         self._pro = pro
-        self.edit.setPlaceholderText("股票名、代码或关键词;别名用 | 连,如 贵州茅台|600519" if pro else "填一个关键词,如 降准")
+        self.edit.setPlaceholderText("关键词或别名，如 贵州茅台|600519" if pro else "填一个关键词,如 降准")
         self._refresh()
 
     def _refresh(self):
-        n = self.list.count()
+        while self.flow.count():
+            widget = self.flow.takeAt(0).widget()
+            widget.hide()
+            widget.deleteLater()
+        for word in self._words:
+            self.flow.addWidget(KeywordChip(word, self._remove))
+        self.chips.setVisible(bool(self._words))
+        self.chips.updateGeometry()
+        n = len(self._words)
         full = not self._pro and n >= 1
         self.edit.setEnabled(not full)
         self.add_btn.setEnabled(not full)
@@ -1238,32 +1343,33 @@ class KeywordList(QtWidgets.QWidget):
             self.count.setText(f"已配置 {n} 个;免费版只生效第 1 个,激活会员后全部生效")
         else:
             self.count.setText(f"已配置 {n} 个 · 免费版限 1 个,会员不限个数、支持别名和代码整词匹配")
+        self.updateGeometry()
 
     def _add(self):
-        parts = [w.strip() for w in self.edit.text().replace("，", ",").split(",") if w.strip()]
-        have = {self.list.item(i).text() for i in range(self.list.count())}
-        for w in parts:
-            if not self._pro and self.list.count() >= 1:
+        for word in self.edit.text().replace("，", ",").split(","):
+            word = word.strip()
+            if not self._pro and self._words:
                 break
-            if w not in have:
-                self.list.addItem(w)
-                have.add(w)
+            if word and word not in self._words:
+                self._words.append(word)
         self.edit.clear()
         self._refresh()
+        self.changed.emit()
 
-    def _remove(self):
-        for it in self.list.selectedItems() or ([self.list.item(self.list.count() - 1)] if self.list.count() else []):
-            self.list.takeItem(self.list.row(it))
+    def _remove(self, word):
+        if word not in self._words:
+            return
+        index = self._words.index(word)
+        self._words.remove(word)
         self._refresh()
-
-    def keyPressEvent(self, e):
-        if e.key() in (QtCore.Qt.Key.Key_Delete, QtCore.Qt.Key.Key_Backspace) and self.list.hasFocus():
-            self._remove()
+        self.changed.emit()
+        if self.flow.count():
+            self.flow.itemAt(min(index, self.flow.count() - 1)).widget().remove_btn.setFocus()
         else:
-            super().keyPressEvent(e)
+            self.edit.setFocus()
 
     def values(self) -> list:
-        return [self.list.item(i).text() for i in range(self.list.count())]
+        return list(self._words)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -1271,14 +1377,14 @@ class SettingsDialog(QtWidgets.QDialog):
     probe_sig = QtCore.Signal(str)
     probe_done = QtCore.Signal()
 
-    LBL_W = 62
+    LBL_W = 96
 
     def __init__(self, conf: dict, sources: list | None = None):
         super().__init__()
         self.setWindowTitle("Bulletin · 弹讯设置")
-        self.setMinimumWidth(880)
+        self.setMinimumSize(780, 520)
         avail = QtWidgets.QApplication.primaryScreen().availableGeometry().height()
-        self.resize(940, min(900, avail - 40))   # 屏幕矮时封顶,多出的靠滚动
+        self.resize(940, min(800, avail - 40))
         self._c = conf
         self._t = THEMES.get(conf.get("theme", "浅色"), THEMES["浅色"])
         self._tags: list = []
@@ -1293,40 +1399,59 @@ class SettingsDialog(QtWidgets.QDialog):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        self._scroll = scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.viewport().setStyleSheet(f"background:{self._t['bg']};")
-        self._content = content = QtWidgets.QWidget()
-        content.setStyleSheet(f"background:{self._t['bg']};")
-        rootv = QtWidgets.QVBoxLayout(content)
-        rootv.setContentsMargins(16, 12, 16, 8)
-        rootv.setSpacing(10)
+        body = QtWidgets.QHBoxLayout()
+        body.setSpacing(0)
+        self.nav = QtWidgets.QListWidget()
+        self.nav.setObjectName("settingsNav")
+        self.nav.setAccessibleName("设置分类")
+        self.nav.setFixedWidth(156)
+        self.nav.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.pages = QtWidgets.QStackedWidget()
+        self._page_layouts = []
+        self._page_scrolls = []
+        descriptions = [
+            ("弹幕外观", "调整文字、显示区域和弹幕节奏，修改后自动生效。"),
+            ("关注与过滤", "突出你关心的消息，减少不想看的内容。"),
+            ("新闻源", "选择内容来源，添加 RSS 链接并检查是否可用。"),
+            ("回看与隐私", "管理收藏位置、屏幕共享和快捷操作。"),
+            ("会员", "查看会员状态与功能。免费功能始终可用。"),
+        ]
+        for title, description in descriptions:
+            self.nav.addItem(title)
+            item = self.nav.item(self.nav.count() - 1)
+            item.setSizeHint(QtCore.QSize(140, 44))
+            page = QtWidgets.QScrollArea()
+            page.setWidgetResizable(True)
+            page.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            content = QtWidgets.QWidget()
+            content.setObjectName("settingsPage")
+            layout = QtWidgets.QVBoxLayout(content)
+            layout.setContentsMargins(24, 24, 24, 24)
+            layout.setSpacing(16)
+            heading = QtWidgets.QLabel(title)
+            heading.setObjectName("pageHeading")
+            layout.addWidget(heading)
+            hint = QtWidgets.QLabel(description)
+            hint.setWordWrap(True)
+            hint.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
+            self._rlabels.append(hint)
+            layout.addWidget(hint)
+            page.setWidget(content)
+            self.pages.addWidget(page)
+            self._page_layouts.append(layout)
+            self._page_scrolls.append(page)
+        self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.nav.setCurrentRow(0)
+        body.addWidget(self.nav)
+        body.addWidget(self.pages, 1)
+        outer.addLayout(body, 1)
 
-        trow = QtWidgets.QHBoxLayout()
-        tlab = QtWidgets.QLabel("主题")
-        tlab.setFixedWidth(self.LBL_W)
-        tlab.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        tlab.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
-        self._rlabels.append(tlab)
+        g = self._card("设置面板", self._page_layouts[0])
         self.theme_combo = QtWidgets.QComboBox()
-        for name in THEMES:
-            self.theme_combo.addItem(name)
+        self.theme_combo.addItems(THEMES)
         self.theme_combo.setCurrentText(conf.get("theme", "浅色"))
         self.theme_combo.currentTextChanged.connect(self._apply_theme)
-        trow.addWidget(tlab)
-        trow.addWidget(self.theme_combo, 1)
-        rootv.addLayout(trow)
-
-        cols = QtWidgets.QHBoxLayout()
-        cols.setSpacing(14)
-        self._colL = QtWidgets.QVBoxLayout(); self._colL.setSpacing(8)
-        self._colR = QtWidgets.QVBoxLayout(); self._colR.setSpacing(8)
-        cols.addLayout(self._colL, 1)
-        cols.addLayout(self._colR, 1)
-        rootv.addLayout(cols)
-        scroll.setWidget(content)
-        outer.addWidget(scroll, 1)
+        self._row(g, "面板主题", self.theme_combo)
 
         def _area_lbl(v):
             return {25: "1/4 屏", 50: "半屏", 75: "3/4 屏", 100: "满屏"}.get(v, f"{v}%")
@@ -1339,7 +1464,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return "密" if v < 700 else ("疏" if v > 1700 else "适中")
 
         # ============ 左栏:弹幕样式 ============
-        g = self._card("弹幕样式", self._colL)
+        g = self._card("弹幕样式", self._page_layouts[0])
         self.area = self._slider_row(g, "显示区域", 25, 100, float(conf["top_fraction"]) * 100, _area_lbl)
         self._area_prev = AreaPreview(self, float(conf["top_fraction"]))
         self._previews.append(self._area_prev)
@@ -1359,7 +1484,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.color_btn = QtWidgets.QPushButton(self.color)
         self.color_btn.setFixedWidth(96)
         self.color_btn.clicked.connect(self._pick)
-        cw, self.colorful = self._toggle_cell("彩色弹幕", conf.get("colorful", False))
+        cw, self.colorful = self._toggle_cell("按来源配色", conf.get("colorful", False))
         crow = QtWidgets.QHBoxLayout()
         crow.addWidget(self.color_btn)
         crow.addSpacing(14)
@@ -1380,7 +1505,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._row(g, "字体", self.family)
 
         # ============ 左栏:显示与密度 ============
-        g = self._card("显示与密度", self._colL)
+        g = self._card("显示与密度", self._page_layouts[0])
         self.display = QtWidgets.QComboBox()
         self.display.addItem("此屏(主)", "primary")
         self.display.addItem("横贯全部(接力/双屏)", "span")
@@ -1390,43 +1515,44 @@ class SettingsDialog(QtWidgets.QDialog):
         self.display.setCurrentIndex(_i if _i >= 0 else 0)
         self._row(g, "显示器", self.display)
 
-        self.interval = self._slider_row(g, "出现节奏", 200, 3000, int(conf["spawn_interval_ms"]), _flow_lbl)
+        self.interval = self._slider_row(g, "消息密度", 200, 3000, int(conf["spawn_interval_ms"]), _flow_lbl)
+        self._hint(g, "消息密度控制弹幕出现的疏密，不影响抓取频率；实际间隔会随待显示消息数调整。")
         self.maxon = self._slider_row(g, "同屏上限", 10, 200, int(conf["max_on_screen"]), lambda v: f"{v}条")
 
         tg = QtWidgets.QGridLayout()
         tg.setHorizontalSpacing(24)
         tg.setVerticalSpacing(7)
-        w1, self.hover_pause = self._toggle_cell("悬停暂停", conf.get("hover_pause", True))
+        w1, self.hover_pause = self._toggle_cell("鼠标停留时暂停", conf.get("hover_pause", True))
         w2, self.show_tag = self._toggle_cell("来源标签", conf.get("show_source_tag", True))
         w3, self.show_time = self._toggle_cell("显示时间", conf.get("show_time", True))
-        w4, self.adaptive = self._toggle_cell("长弹幕加速", conf.get("adaptive_speed", False))
+        w4, self.adaptive = self._toggle_cell("长消息加速", conf.get("adaptive_speed", False))
         w5, self.autostart_sw = self._toggle_cell("开机自启", autostart.is_enabled())
-        w6, self.fs_pause_sw = self._toggle_cell("全屏暂停", conf.get("pause_on_fullscreen", True))
+        w6, self.fs_pause_sw = self._toggle_cell("全屏应用时暂停", conf.get("pause_on_fullscreen", True))
         for i, w in enumerate((w1, w2, w3, w4, w5, w6)):
             tg.addWidget(w, i // 2, i % 2)
         self._row(g, "", tg)
 
         # ============ 右栏:关注词提醒 ============
-        g = self._card("关注词提醒", self._colR)
+        g = self._card("关注词提醒", self._page_layouts[1])
         self.alert_kw = KeywordList(conf.get("alert_keywords", []), False)
         self._row(g, "关注词", self.alert_kw)
         ag = QtWidgets.QGridLayout()
         ag.setHorizontalSpacing(24)
-        a1, self.alert_sound = self._toggle_cell("提示音", conf.get("alert_sound", True))
-        a2, self.alert_notify = self._toggle_cell("暂停时通知", conf.get("alert_notify", True))
+        a1, self.alert_sound = self._toggle_cell("命中时响提示音", conf.get("alert_sound", True))
+        a2, self.alert_notify = self._toggle_cell("弹幕不可见时通知", conf.get("alert_notify", True))
         ag.addWidget(a1, 0, 0)
         ag.addWidget(a2, 0, 1)
         self._row(g, "", ag)
         tg2 = QtWidgets.QGridLayout()
         tg2.setHorizontalSpacing(24)
-        for i, name in enumerate(("总是通知", "只放命中")):
+        for i, name in enumerate(("命中时始终通知", "只显示关注消息")):
             cell, sw = self._toggle_cell(name, False)
             sw.setEnabled(False)
             tg2.addWidget(cell, 0, i)
         self._row(g, "", self._pro_teaser(tg2, "会员版:弹幕在放时命中也发通知,或只放命中关注词的快讯"))
 
         # ============ 右栏:过滤 ============
-        g = self._card("过滤", self._colR)
+        g = self._card("过滤", self._page_layouts[1])
         self.mute = QtWidgets.QLineEdit(", ".join(conf.get("mute_keywords", [])))
         self.mute.setPlaceholderText("屏蔽词,逗号分隔;含这些词的不显示")
         self._row(g, "屏蔽词", self.mute)
@@ -1438,7 +1564,10 @@ class SettingsDialog(QtWidgets.QDialog):
         wl.addWidget(self.only_kw, 1)
         wl.addSpacing(10)
         wl.addWidget(self.only_enabled)
-        self._row(g, "白名单", wl)
+        self._row(g, "内容关键词", wl)
+        self._hint(g, "开启右侧开关后，只显示含这里任一关键词的消息；命中上方关注词的消息也会保留。多个词用逗号分隔。")
+        self.only_kw.setEnabled(self.only_enabled.isChecked())
+        self.only_enabled.toggled.connect(self.only_kw.setEnabled)
 
         self._sources = list(sources or [])
         self.src_checks: dict = {}
@@ -1459,24 +1588,32 @@ class SettingsDialog(QtWidgets.QDialog):
             self._row(g, "按来源", hint)
 
         # ============ 右栏:新闻源 ============
-        g = self._card("新闻源", self._colR)
+        g = self._card("新闻源", self._page_layouts[2])
         self.rsshub = QtWidgets.QLineEdit(conf.get("rsshub_base", ""))
         self.rsshub.setPlaceholderText("自建 RSSHub 基址;feeds 里 {rsshub} 会替换成它")
-        self._row(g, "RSSHub", self.rsshub)
-        self.poll = self._slider_row(g, "轮询", 15, 600, int(conf["poll_interval"]), lambda v: f"{v}s")
-        self.conserve = QtWidgets.QCheckBox("日报每30分钟、热搜每10分钟（其它源按轮询间隔）")
+        self._row(g, "自建中转", self.rsshub)
+        self._hint(g, "仅使用自建 RSSHub 的用户需要填写。普通 RSS 链接无需修改此项；链接中的 {rsshub} 会替换为这个地址。")
+        self.poll = self._slider_row(g, "检查间隔", 15, 600, int(conf["poll_interval"]), lambda v: f"{v}s")
+        self.conserve = QtWidgets.QCheckBox("降低日报、热搜的检查频率")
         self.conserve.setChecked(conf.get("conserve_bandwidth", True))
         self._row(g, "省流", self.conserve)
+        conserve_hint = QtWidgets.QLabel("日报每 30 分钟、热搜每 10 分钟检查一次。\n其它来源使用上面的检查间隔。")
+        conserve_hint.setWordWrap(True)
+        conserve_hint.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
+        self._rlabels.append(conserve_hint)
+        self._row(g, "", conserve_hint)
 
         prow = QtWidgets.QHBoxLayout()
         plab = QtWidgets.QLabel("预设")
         plab.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
         self._rlabels.append(plab)
         prow.addWidget(plab)
-        for name in cfg.PRESETS:
-            b = QtWidgets.QPushButton(name)
-            b.clicked.connect(lambda _=False, n=name: self.feeds.setPlainText("\n".join(cfg.PRESETS[n])))
-            prow.addWidget(b)
+        self.preset_combo = QtWidgets.QComboBox()
+        self.preset_combo.addItems(cfg.PRESETS)
+        prow.addWidget(self.preset_combo, 1)
+        preset_btn = QtWidgets.QPushButton("使用预设…")
+        preset_btn.clicked.connect(self._use_preset)
+        prow.addWidget(preset_btn)
         prow.addStretch(1)
         self.detect_btn = QtWidgets.QPushButton("检测源")
         self.detect_btn.clicked.connect(self._detect)
@@ -1484,20 +1621,29 @@ class SettingsDialog(QtWidgets.QDialog):
         g.addLayout(prow)
 
         self.feeds = QtWidgets.QPlainTextEdit("\n".join(conf["feeds"]))
-        self.feeds.setMinimumHeight(58)
+        self.feeds.setMinimumHeight(150)
         self.feeds.setPlaceholderText("每行一个 RSS 链接;用自建 RSSHub 时可写 {rsshub}/路由")
         self._row(g, "链接", self.feeds)
 
         self.probe_box = QtWidgets.QPlainTextEdit()
         self.probe_box.setReadOnly(True)
-        self.probe_box.setMaximumHeight(52)
+        self.probe_box.setFixedHeight(100)
         self.probe_box.setPlaceholderText("点「检测源」逐条测试(✓ 可用 / ✗ 不可用)")
         self.probe_sig.connect(self.probe_box.appendPlainText)
         self.probe_done.connect(lambda: self.detect_btn.setEnabled(True))
         self._row(g, "检测", self.probe_box)
 
+        g = self._card("会员功能预览", self._page_layouts[3])
+        hint = QtWidgets.QLabel("会员版支持回看与收藏、存到 Obsidian、共享屏幕时隐藏弹幕和全局快捷键。")
+        hint.setWordWrap(True)
+        self._row(g, "说明", hint)
+        for name in ("共享屏幕时隐藏", "全局快捷键"):
+            cell, switch = self._toggle_cell(name, False)
+            switch.setEnabled(False)
+            self._row(g, "", self._pro_teaser(cell, "此功能在会员版中提供"))
+
         # ============ 左栏:会员版功能 ============
-        g = self._card("会员版功能", self._colL)
+        g = self._card("会员版功能", self._page_layouts[4])
         promo = QtWidgets.QLabel(
             "关注词不限个数,支持别名与股票代码整词匹配 · 同事件合并 · "
             "回看与收藏 · 共享屏幕时隐藏 · 全局快捷键 · 弹幕放在顶部、居中或底部<br>"
@@ -1507,46 +1653,131 @@ class SettingsDialog(QtWidgets.QDialog):
         self._tlabels.append(promo)
         self._row(g, "", promo)
 
-        self._colL.addStretch(1)
-        self._colR.addStretch(1)
+        for layout in self._page_layouts:
+            layout.addStretch(1)
 
-        self.saved_lbl = QtWidgets.QLabel("")
-        self.saved_lbl.setStyleSheet("color:#7DE38B;background:transparent;")
-        btns = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Close)
-        btns.button(QtWidgets.QDialogButtonBox.StandardButton.Save).clicked.connect(self._save)
+        self.saved_lbl = QtWidgets.QLabel("修改后自动生效，并记住设置")
+        self.saved_lbl.setObjectName("saveStatus")
+        btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
         btns.rejected.connect(self.close)
+        btns.button(QtWidgets.QDialogButtonBox.StandardButton.Close).setText("完成")
+        btns.button(QtWidgets.QDialogButtonBox.StandardButton.Close).setObjectName("primaryButton")
+        for button in self.findChildren(QtWidgets.QPushButton):
+            button.setAutoDefault(False)
+            button.setDefault(False)
         bottom = QtWidgets.QHBoxLayout()
-        bottom.setContentsMargins(18, 6, 18, 14)
+        bottom.setContentsMargins(20, 14, 20, 16)
         bottom.addWidget(self.saved_lbl)
         bottom.addStretch(1)
         bottom.addWidget(btns)
-        outer.addLayout(bottom)
+        footer = QtWidgets.QFrame()
+        footer.setObjectName("settingsFooter")
+        footer.setLayout(bottom)
+        outer.addWidget(footer)
+        self._live_timer = QtCore.QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.timeout.connect(self._save)
+        self._last_autostart = self.autostart_sw.isChecked()
+        for slider in self.findChildren(QtWidgets.QSlider):
+            slider.valueChanged.connect(lambda _value: self._queue_apply(60))
+        for switch in self._toggles:
+            switch.toggled.connect(lambda _value: self._queue_apply(0))
+        for combo in self.findChildren(QtWidgets.QComboBox):
+            if combo is not self.preset_combo:
+                combo.currentIndexChanged.connect(lambda _value: self._queue_apply(0))
+        self.conserve.toggled.connect(lambda _value: self._queue_apply(0))
+        for field in (self.mute, self.only_kw, self.rsshub):
+            field.textChanged.connect(lambda _text: self._queue_apply(500))
+        if hasattr(self, "obs_dir"):
+            self.obs_dir.textChanged.connect(lambda _text: self._queue_apply(500))
+        self.feeds.textChanged.connect(lambda: self._queue_apply(600))
+        self.alert_kw.changed.connect(lambda: self._queue_apply(0))
+
+    def _queue_apply(self, delay=0):
+        self.saved_lbl.setText("正在应用…")
+        if delay <= 60 and self._live_timer.isActive() and self._live_timer.remainingTime() <= delay:
+            return
+        self._live_timer.start(delay)
+
+    def _flush_live(self):
+        if self._live_timer.isActive():
+            self._live_timer.stop()
+            self._save()
+
+    def closeEvent(self, event):
+        self._flush_live()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._flush_live()
+        super().reject()
+
+    def keyPressEvent(self, event):
+        # Enter in the keyword editor adds a tag without closing the dialog.
+        if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     # ---------- 主题 ----------
     @staticmethod
     def _qss(t):
+        accent = QtGui.QColor(t["fill"])
+        selection = f"rgba({accent.red()},{accent.green()},{accent.blue()},28)"
         return (
             f"QDialog,QScrollArea,QScrollArea>QWidget>QWidget{{background:{t['bg']};}}"
             f"QLabel{{color:{t['tx']};background:transparent;}}"
             "QScrollArea{border:none;}"
+            "QScrollBar:vertical{background:transparent;width:12px;margin:4px 0;border:0;}"
+            f"QScrollBar::handle:vertical{{background:{t['mut']};border-radius:3px;min-height:36px;margin:0 3px;}}"
+            f"QScrollBar::handle:vertical:hover{{background:{t['tx']};}}"
+            f"QScrollBar::handle:vertical:pressed{{background:{t['fill']};}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;width:0;background:transparent;border:0;}"
+            "QScrollBar::up-arrow:vertical,QScrollBar::down-arrow:vertical{width:0;height:0;}"
+            "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}"
+            "QScrollBar:horizontal{background:transparent;height:12px;margin:0 4px;border:0;}"
+            f"QScrollBar::handle:horizontal{{background:{t['mut']};border-radius:3px;min-width:36px;margin:3px 0;}}"
+            f"QScrollBar::handle:horizontal:hover{{background:{t['tx']};}}"
+            f"QScrollBar::handle:horizontal:pressed{{background:{t['fill']};}}"
+            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{height:0;width:0;background:transparent;border:0;}"
+            "QScrollBar::left-arrow:horizontal,QScrollBar::right-arrow:horizontal{width:0;height:0;}"
+            "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}"
+            "QAbstractScrollArea::corner{background:transparent;border:0;}"
+            f"QFrame#settingsFooter{{background:{t['card']};border:0;border-top:1px solid {t['bd']};}}"
+
             f"QFrame#card{{background:{t['card']};border:1px solid {t['bd']};border-radius:10px;}}"
             f"QSpinBox,QPlainTextEdit,QLineEdit,QFontComboBox,QComboBox{{background:{t['inp']};"
-            f"color:{t['tx']};border:1px solid {t['bd']};border-radius:6px;padding:5px 8px;}}"
+            f"color:{t['tx']};border:1px solid {t['bd']};border-radius:8px;padding:7px 10px;}}"
+            f"QLineEdit:hover,QComboBox:hover,QPlainTextEdit:hover{{border-color:{t['mut']};}}"
             f"QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus{{border-color:{t['fill']};}}"
             f"QComboBox::drop-down{{border:none;}}QComboBox QAbstractItemView{{background:{t['inp']};"
             f"color:{t['tx']};selection-background-color:{t['bd']};}}"
             f"QPushButton{{background:{t['card']};color:{t['tx']};border:1px solid {t['bd']};"
-            f"border-radius:7px;padding:6px 12px;}}QPushButton:hover{{border-color:{t['fill']};}}"
-            f"QSlider::groove:horizontal{{height:5px;background:{t['bd']};border-radius:3px;}}"
-            f"QSlider::sub-page:horizontal{{background:{t['fill']};border-radius:3px;}}"
+            f"border-radius:8px;padding:7px 14px;}}QPushButton:hover{{border-color:{t['fill']};}}"
+            f"QSlider::groove:horizontal{{height:5px;background:{t['bd']};border-radius:2px;}}"
+            f"QSlider::sub-page:horizontal{{background:{t['fill']};border-radius:2px;}}"
             f"QSlider::handle:horizontal{{width:15px;height:15px;margin:-5px 0;background:{t['hd']};"
-            f"border:2px solid {t['fill']};border-radius:8px;}}"
+            f"border:2px solid {t['fill']};border-radius:6px;}}"
             f"QListWidget{{background:{t['inp']};color:{t['tx']};border:1px solid {t['bd']};border-radius:6px;}}"
             "QListWidget::item{padding:3px 6px;}"
             f"QListWidget::item:selected{{background:{t['bd']};color:{t['tx']};}}"
             f"QLabel#proTag{{color:{t['fill']};border:1px solid {t['fill']};border-radius:8px;"
-            "padding:0 6px;font-size:11px;}"
+            "padding:2px 7px;font-size:11px;max-height:20px;}"
+            f"QDialog{{font-size:13px;}}QWidget#settingsPage{{background:{t['bg']};}}"
+            f"QLabel#pageHeading{{font-size:24px;font-weight:600;color:{t['tx']};}}"
+            f"QLabel#saveStatus{{color:{t['mut']};}}"
+            f"QListWidget#settingsNav{{background:{t['card']};border:0;border-right:1px solid {t['bd']};border-radius:0;padding:18px 8px;}}"
+            f"QListWidget#settingsNav::item{{padding:0 12px;border-radius:6px;margin:3px 0;}}"
+            f"QListWidget#settingsNav::item:selected{{background:{selection};color:{t['ti']};font-weight:600;}}"
+            f"QListWidget#settingsNav::item:hover{{background:{selection};}}"
+            f"QListWidget#settingsNav::item:focus{{border:1px solid {t['fill']};}}"
+            f"QPushButton#primaryButton{{background:{t['ti']};color:{t['bg']};border-color:{t['ti']};font-weight:600;}}"
+            f"QPushButton:focus,QAbstractButton:focus{{border:1px solid {t['fill']};}}"
+            f"QPushButton:pressed{{background:{selection};}}"
+            f"QSlider:focus{{background:{t['bd']};border-radius:4px;}}"
+            f"QFrame#keywordChip{{background:{t['bd']};border-radius:16px;}}"
+            f"QToolButton#removeKeyword{{color:{t['tx']};background:transparent;border:0;border-radius:12px;font-size:17px;}}"
+            f"QToolButton#removeKeyword:hover,QToolButton#removeKeyword:focus{{background:{t['card']};border:1px solid {t['ti']};}}"
             f"QWidget:disabled{{color:{t['mut']};}}"
         )
 
@@ -1554,10 +1785,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self._t = THEMES.get(name, self._t)
         t = self._t
         self.setStyleSheet(self._qss(t))
-        self._scroll.viewport().setStyleSheet(f"background:{t['bg']};")
-        self._content.setStyleSheet(f"background:{t['bg']};")
+        for page in self._page_scrolls:
+            page.viewport().setStyleSheet(f"background:{t['bg']};")
         for lb in self._titles:
-            lb.setStyleSheet(f"color:{t['ti']};font-weight:600;letter-spacing:2px;padding:5px 2px 2px;background:transparent;")
+            lb.setStyleSheet(f"color:{t['ti']};font-weight:600;font-size:14px;padding:4px 0;background:transparent;")
         for lb in self._rlabels:
             lb.setStyleSheet(f"color:{t['mut']};background:transparent;")
         for lb in self._vlabels:
@@ -1586,15 +1817,15 @@ class SettingsDialog(QtWidgets.QDialog):
 
     # ---------- 布局小工具 ----------
     def _card(self, title, col):
-        lab = QtWidgets.QLabel("▎ " + title)
-        lab.setStyleSheet(f"color:{self._t['ti']};font-weight:600;letter-spacing:2px;padding:5px 2px 2px;background:transparent;")
+        lab = QtWidgets.QLabel(title)
+        lab.setStyleSheet(f"color:{self._t['ti']};font-weight:600;font-size:14px;padding:4px 0;background:transparent;")
         self._titles.append(lab)
         col.addWidget(lab)
         frame = QtWidgets.QFrame()
         frame.setObjectName("card")
         v = QtWidgets.QVBoxLayout(frame)
-        v.setContentsMargins(14, 9, 14, 10)
-        v.setSpacing(7)
+        v.setContentsMargins(18, 16, 18, 16)
+        v.setSpacing(14)
         col.addWidget(frame)
         return v
 
@@ -1602,18 +1833,27 @@ class SettingsDialog(QtWidgets.QDialog):
         row = QtWidgets.QHBoxLayout()
         lab = QtWidgets.QLabel(label)
         lab.setFixedWidth(self.LBL_W)
+        lab.setWordWrap(True)
         lab.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
         lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self._rlabels.append(lab)
-        row.addWidget(lab)
+        if label:
+            row.addWidget(lab)
+        else:
+            lab.hide()
         if isinstance(widget_or_layout, QtWidgets.QLayout):
             row.addLayout(widget_or_layout, 1)
         else:
             row.addWidget(widget_or_layout, 1)
+            if label:
+                lab.setBuddy(widget_or_layout)
+                widget_or_layout.setAccessibleName(label)
         card.addLayout(row)
 
     def _slider_row(self, card, label, lo, hi, val, fmt):
         s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        s.setAccessibleName(label)
+        s.setMinimumHeight(28)
         s.setRange(int(lo), int(hi))
         s.setValue(int(val))
         vlab = QtWidgets.QLabel(fmt(int(val)))
@@ -1628,26 +1868,61 @@ class SettingsDialog(QtWidgets.QDialog):
         self._row(card, label, wrap)
         return s
 
+    def _hint(self, card, text):
+        hint = QtWidgets.QLabel(text)
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
+        self._rlabels.append(hint)
+        self._row(card, "", hint)
+
     def _toggle_cell(self, label, checked):
+        descriptions = {'命中时始终通知': '收到含关注词的新消息就发系统通知，弹幕正在显示时也通知。', '只显示关注消息': '只显示含上方关注词的消息，其它消息不进入弹幕。', '命中时响提示音': '收到含关注词的新消息时响一声；连续命中最多每 3 秒响一次。', '弹幕不可见时通知': '弹幕暂停、隐藏或因全屏暂停时，收到含关注词的消息仍发系统通知。', '长消息加速': '让较长的文字更快滑过；关注词命中的消息仍保持慢速。', '按来源配色': '不同来源的弹幕用不同颜色，覆盖左侧选择的统一文字颜色。', '鼠标停留时暂停': '鼠标移到某条弹幕上时暂停这一条，移开后继续。', '全屏应用时暂停': '使用全屏应用时暂停显示弹幕，退出全屏后恢复。', '合并重复消息': '不同来源报道相似的同一事件时只显示一次，并标出新增来源数。', '共享屏幕时隐藏': '截图、录屏或共享屏幕时隐藏弹幕层；不影响自己桌面上观看。'}
+        description = descriptions.get(label, "")
         w = QtWidgets.QWidget()
         h = QtWidgets.QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(8)
+        h.setSpacing(10)
         if label:
+            text = QtWidgets.QVBoxLayout()
+            text.setSpacing(4)
             lab = QtWidgets.QLabel(label)
-            lab.setStyleSheet(f"color:{self._t['tx']};background:transparent;")
+            lab.setWordWrap(True)
             self._tlabels.append(lab)
-            h.addWidget(lab)
-        h.addStretch(1)
+            text.addWidget(lab)
+            if description:
+                hint = QtWidgets.QLabel(description)
+                hint.setWordWrap(True)
+                hint.setStyleSheet(f"color:{self._t['mut']};background:transparent;")
+                self._rlabels.append(hint)
+                text.addWidget(hint)
+            h.addLayout(text, 1)
+        else:
+            h.addStretch(1)
         sw = ToggleSwitch(checked, self)
+        sw.setAccessibleName(label or "启用内容关键词过滤")
+        sw.setAccessibleDescription(description)
         self._toggles.append(sw)
         h.addWidget(sw)
         return w, sw
+
+    def _use_preset(self):
+        name = self.preset_combo.currentText()
+        if self.feeds.toPlainText().strip():
+            answer = QtWidgets.QMessageBox.question(
+                self, "替换新闻源？", f"使用「{name}」预设会替换当前链接列表，并立即应用。",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No)
+            if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+        self.feeds.setPlainText("\n".join(cfg.PRESETS[name]))
 
     def _detect(self):
         base = self.rsshub.text().strip()
         urls = [ln.strip() for ln in self.feeds.toPlainText().splitlines() if ln.strip()]
         self.probe_box.clear()
+        if not urls:
+            self.probe_box.setPlainText("请先添加 RSS 链接，或选择一套预设。")
+            return
         self.detect_btn.setEnabled(False)
 
         def work():
@@ -1668,9 +1943,11 @@ class SettingsDialog(QtWidgets.QDialog):
         if c.isValid():
             self.color = c.name()
             self.color_btn.setText(self.color)
+            self._queue_apply(0)
 
     def _save(self):
         c = self._c
+        before = dict(c)
         c["alert_keywords"] = self.alert_kw.values()[:1]
         c["alert_sound"] = self.alert_sound.isChecked()
         c["alert_notify"] = self.alert_notify.isChecked()
@@ -1680,13 +1957,14 @@ class SettingsDialog(QtWidgets.QDialog):
         c["speed"] = round(self.speed.value() / 10, 1)
         c["opacity"] = round(self.opacity.value() / 100, 2)
         c["top_fraction"] = round(self.area.value() / 100, 2)
-        c["top_offset"] = 0.03
         c["colorful"] = self.colorful.isChecked()
         c["outline"] = self.outline.value()
         c["adaptive_speed"] = self.adaptive.isChecked()
         c["pause_on_fullscreen"] = self.fs_pause_sw.isChecked()
         c["autostart"] = self.autostart_sw.isChecked()
-        autostart.set_autostart(c["autostart"])         # 立即注册/注销登录启动项
+        if c["autostart"] != self._last_autostart:
+            autostart.set_autostart(c["autostart"])
+            self._last_autostart = c["autostart"]
         c["only_enabled"] = self.only_enabled.isChecked()
         c["only_keywords"] = [w.strip() for w in self.only_kw.text().replace("，", ",").split(",") if w.strip()]
         if self.src_checks:
@@ -1703,6 +1981,6 @@ class SettingsDialog(QtWidgets.QDialog):
         c["poll_interval"] = self.poll.value()
         c["conserve_bandwidth"] = self.conserve.isChecked()
         c["feeds"] = [ln.strip() for ln in self.feeds.toPlainText().splitlines() if ln.strip()]
-        self.applied.emit()
-        self.saved_lbl.setText("已保存 ✓")
-        QtCore.QTimer.singleShot(1800, lambda: self.saved_lbl.setText(""))
+        if c != before:
+            self.applied.emit()
+        self.saved_lbl.setText("已自动应用并记住设置")

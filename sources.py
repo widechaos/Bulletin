@@ -150,6 +150,7 @@ class NewsItem:
     url: str
     source: str
     ts: float = 0.0     # 发布时间(epoch 秒);0 = 未知
+    desc: str = ""      # RSS 摘要前 300 字,只用于关注词匹配,不存进回看
     alert: bool = False  # 命中关注词
 
 
@@ -173,6 +174,7 @@ class RSSPoller(threading.Thread):
             return
         first = True
         while not self._stop.is_set():
+            settings = self._settings_signature()
             fresh = self._poll()
             if first and not self.conf.get("emit_backlog", False):
                 # 启动只放最新 startup_count 条(由 overlay 队列按频率慢慢吐出,渐进不刷屏)
@@ -185,7 +187,15 @@ class RSSPoller(threading.Thread):
             for _ in range(interval):
                 if self._stop.is_set():
                     return
-                time.sleep(1)
+                if self._stop.wait(1):
+                    return
+                if self._settings_signature() != settings:
+                    self._last_poll.clear()
+                    break
+
+    def _settings_signature(self):
+        return (tuple(self.conf.get("feeds", [])), self.conf.get("rsshub_base", ""),
+                self.conf.get("poll_interval", 120), self.conf.get("conserve_bandwidth", True))
 
     def _poll(self) -> list[NewsItem]:
         mutes = [m.strip().lower() for m in self.conf.get("mute_keywords", []) if m.strip()]
@@ -226,7 +236,8 @@ class RSSPoller(threading.Thread):
                     continue
                 tstruct = e.get("published_parsed") or e.get("updated_parsed")
                 epoch = calendar.timegm(tstruct) if tstruct else 0.0   # struct_time 是 UTC
-                fresh.append((tstruct, NewsItem(title, e.get("link", ""), source, epoch)))
+                desc = _clean(e.get("summary", ""))[:300]
+                fresh.append((tstruct, NewsItem(title, e.get("link", ""), source, epoch, desc=desc)))
         # 最新在前
         fresh.sort(key=lambda t: t[0] or time.gmtime(0), reverse=True)
         return [it for _, it in fresh]

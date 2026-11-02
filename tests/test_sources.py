@@ -66,6 +66,14 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(sources.fetch_parse(self.url, '', validators).entries[0].title, 'Second')
         self.assertEqual(validators.etag, '"v2"')
 
+    def test_poll_keeps_cleaned_summary_for_alerts(self):
+        desc = '<description>&lt;p&gt;600519 午后  &lt;b&gt;拉升&lt;/b&gt;&lt;/p&gt;</description>'
+        self.server.state.update(etag='', gzip=False, body=RSS.replace(b'</title></item>', ('</title>' + desc + '</item>').encode()))
+        with patch.object(sources.cfg, 'load_seen', return_value=set()):
+            poller = sources.RSSPoller({'feeds': [self.url]}, queue.Queue())
+        [item] = poller._poll()
+        self.assertEqual((item.title, item.desc), ('First', '600519 午后 拉升'))
+
     def test_last_modified_fallback(self):
         self.server.state.update(etag='', modified='Wed, 14 Oct 2026 08:00:00 GMT', gzip=False)
         validators = sources.FeedValidators()
