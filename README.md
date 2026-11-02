@@ -1,6 +1,6 @@
 # Bulletin · 弹讯
 
-> 桌面弹幕新闻 —— 让实时快讯以弹幕飞在桌面上
+> 盯盘族的桌面快讯条 —— 关注词一出现就提醒你
 
 <p align="center">
   <a href="https://github.com/widechaos/Bulletin/releases/latest"><img src="https://img.shields.io/github/v/release/widechaos/Bulletin?color=7AA2F7&label=release" alt="release"></a>
@@ -9,9 +9,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-PolyForm%20Noncommercial-9ECE6A" alt="license"></a>
 </p>
 
-让新闻**以弹幕的形式直接飞在你的桌面上** —— 全透明、置顶、**鼠标穿透不挡任何程序操作**。只有当指针停在某条弹幕上时它才暂停并可点:**左键直接击碎,右键复制并击碎,Ctrl(Mac 上 ⌃ 或 ⌘)+左键打开原文,中键 / ⌥右键 / 托盘开菜单**。
+**盯盘不用一直开着网页。** 你订阅的快讯以弹幕形式在屏幕上方安静地飞过 —— 全透明、置顶、**鼠标穿透不挡任何程序操作**;关注的股票和关键词一出现,**红底插队、响一声**。只有当指针停在某条弹幕上时它才暂停并可点:**左键直接击碎,右键复制并击碎,Ctrl(Mac 上 ⌃ 或 ⌘)+左键打开原文,中键 / ⌥右键 / 托盘开菜单**。
 
-盯盘、追热点、当环境信息背景板都合适 —— 新条目按节奏**连续放出**,不会一下倒出一堆旧闻。
+适合上班盯 A 股的人、币圈 7×24、在海外想顺手看国内快讯的人。新条目按节奏**连续放出**,不会一下倒出一堆旧闻;装上就能用,不用注册,也不用填任何密钥。
 
 > 基于 Python + Qt(PySide6),跨平台(macOS / Windows / Linux)。
 
