@@ -27,6 +27,7 @@ from danmaku import Danmu
 from sources import probe_feed, resolve_url
 
 PRO_URL = "https://widechaos.cn/bulletin/pro"
+POSITIONS = (("top", "顶部"), ("middle", "居中"), ("bottom", "底部"))
 SPAWN_GAP = 60   # 同泳道两条之间最小水平间隔(px)
 FRAME = 1 / 60   # 速度单位:px/帧(按 60fps 计),实际按真实间隔折算
 GRAVITY = 0.32   # 碎片重力(px/帧²)
@@ -1151,51 +1152,102 @@ class ToggleSwitch(QtWidgets.QAbstractButton):
         p.end()
 
 
-class AreaPreview(QtWidgets.QWidget):
-    """B站式弹幕区域指引:一块屏幕轮廓,顶部按占比着色 —— 一眼看出满屏/半屏。"""
+class _PositionTile(QtWidgets.QAbstractButton):
+    """一块小屏幕:按位置画出弹幕带,下面写顶部/居中/底部;选中描强调色边框。"""
 
-    def __init__(self, owner, frac: float):
+    def __init__(self, owner, key: str, name: str):
         super().__init__()
         self._owner = owner
-        self._frac = float(frac)
-        self.setFixedHeight(44)
-        self.setMinimumWidth(96)
-
-    def setFraction(self, f: float):
-        self._frac = max(0.0, min(1.0, float(f)))
-        self.update()
+        self.key = key
+        self.setText(name)
+        self.setCheckable(True)
+        self.frac = 0.5
+        self.setFixedSize(92, 78)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 
     def paintEvent(self, _e):
         t = self._owner._t
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
-        W, H = self.width(), self.height()
-        sw = min(W - 2, int((H - 4) * 1.6))
-        sh = int(sw / 1.6)
-        x = (W - sw) // 2
-        y = (H - sh) // 2
-        # 屏幕外框
-        p.setPen(QtGui.QPen(QtGui.QColor(t["bd"]), 1))
+        if not self.isEnabled():
+            p.setOpacity(0.4)
+        on = self.isChecked()
+        accent = QtGui.QColor(t["fill"])
+        sw, sh = 72, 45
+        x, y = (self.width() - sw) / 2, 4
+        frame = QtCore.QRectF(x, y, sw, sh)
+        edge = accent if (on or (self.underMouse() and self.isEnabled())) else QtGui.QColor(t["bd"])
+        p.setPen(QtGui.QPen(edge, 2 if on else 1))
         p.setBrush(QtGui.QColor(t["inp"]))
-        p.drawRoundedRect(x, y, sw - 1, sh - 1, 5, 5)
-        # 顶部弹幕带(占屏高的 frac)
-        band = int((sh - 4) * max(0.0, min(1.0, self._frac)))
-        if band > 0:
-            col = QtGui.QColor(t["fill"])
-            col.setAlpha(70)
-            p.setPen(QtCore.Qt.PenStyle.NoPen)
-            p.setBrush(col)
-            p.drawRoundedRect(x + 2, y + 2, sw - 5, band, 3, 3)
-            # 几条弹幕线示意
-            p.setPen(QtGui.QPen(QtGui.QColor(t["fill"]), 2))
-            lines = max(1, band // 7)
-            for i in range(min(lines, 4)):
-                ly = y + 5 + i * 7
-                if ly > y + 2 + band - 2:
-                    break
-                lw = sw - 10 - (i % 3) * 14
-                p.drawLine(x + 5, ly, x + 5 + max(10, lw), ly)
+        p.drawRoundedRect(frame, 6, 6)
+        band = max(4.0, (sh - 6) * max(0.0, min(1.0, self.frac)))
+        room = sh - 6 - band
+        by = y + 3 + {"middle": room / 2, "bottom": room}.get(self.key, 0)
+        fill = QtGui.QColor(accent)
+        fill.setAlpha(110 if on else 55)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(fill)
+        p.drawRoundedRect(QtCore.QRectF(x + 3, by, sw - 6, band), 3, 3)
+        p.setPen(QtGui.QPen(accent, 1.6))
+        for i in range(min(3, int(band // 6))):     # 几条弹幕线示意
+            ly = by + 3 + i * 6
+            p.drawLine(QtCore.QPointF(x + 7, ly), QtCore.QPointF(x + sw - 9 - (i % 2) * 16, ly))
+        f = p.font()
+        f.setBold(on)
+        p.setFont(f)
+        p.setPen(accent if on else QtGui.QColor(t["tx"]))
+        p.drawText(QtCore.QRectF(0, y + sh + 4, self.width(), 22),
+                   QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop, self.text())
         p.end()
+
+    def enterEvent(self, e):
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.update()
+        super().leaveEvent(e)
+
+
+class PositionPicker(QtWidgets.QWidget):
+    """弹幕带位置:三块小屏幕图形,点哪块选哪块。免费只能选顶部,居中、底部置灰。"""
+    changed = QtCore.Signal()
+
+    def __init__(self, owner, pos: str, frac: float):
+        super().__init__()
+        h = QtWidgets.QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(10)
+        self._group = QtWidgets.QButtonGroup(self)
+        self._group.setExclusive(True)
+        self.tiles = []
+        for key, name in POSITIONS:
+            tile = _PositionTile(owner, key, name)
+            tile.frac = frac
+            tile.setChecked(key == pos)
+            self._group.addButton(tile)
+            self.tiles.append(tile)
+            h.addWidget(tile)
+        h.addStretch(1)
+        if not any(t.isChecked() for t in self.tiles):
+            self.tiles[0].setChecked(True)
+        self._group.buttonClicked.connect(lambda _b: self.changed.emit())
+
+    def currentData(self) -> str:
+        return next(t.key for t in self.tiles if t.isChecked())
+
+    def setFraction(self, f: float):
+        for t in self.tiles:
+            t.frac = f
+            t.update()
+
+    def set_pro(self, pro: bool):
+        """没激活:固定顶部,另外两块置灰;激活后三块都能点。"""
+        for t in self.tiles:
+            t.setEnabled(pro or t.key == "top")
+            t.setToolTip("" if (pro or t.key == "top") else "会员可把弹幕带放在居中或底部")
+        if not pro:
+            self.tiles[0].setChecked(True)
 
 
 class KeywordFlow(QtWidgets.QLayout):
@@ -1340,9 +1392,9 @@ class KeywordList(QtWidgets.QWidget):
         if self._pro:
             self.count.setText(f"已配置 {n} 个关注词")
         elif n > 1:
-            self.count.setText(f"已配置 {n} 个;免费版只生效第 1 个,激活会员后全部生效")
+            self.count.setText(f"已配置 {n} 个;免费版只有第 1 个生效,会员全部生效")
         else:
-            self.count.setText(f"已配置 {n} 个 · 免费版限 1 个,会员不限个数、支持别名和代码整词匹配")
+            self.count.setText(f"已配置 {n} 个 · 免费版 1 个;会员不限,填股票名或代码都能认出来")
         self.updateGeometry()
 
     def _add(self):
@@ -1466,14 +1518,13 @@ class SettingsDialog(QtWidgets.QDialog):
         # ============ 左栏:弹幕样式 ============
         g = self._card("弹幕样式", self._page_layouts[0])
         self.area = self._slider_row(g, "显示区域", 25, 100, float(conf["top_fraction"]) * 100, _area_lbl)
-        self._area_prev = AreaPreview(self, float(conf["top_fraction"]))
-        self._previews.append(self._area_prev)
-        self.area.valueChanged.connect(lambda v: self._area_prev.setFraction(v / 100.0))
-        self._row(g, "区域预览", self._area_prev)
-        pos = QtWidgets.QComboBox()
-        pos.addItem("顶部")
-        pos.setEnabled(False)
-        self._row(g, "位置", self._pro_teaser(pos, "会员版可把弹幕带放在屏幕顶部、居中或底部"))
+        self.position = PositionPicker(self, "top", float(conf["top_fraction"]))
+        self.position.set_pro(False)
+        self._previews += self.position.tiles
+        self.area.valueChanged.connect(lambda v: self.position.setFraction(v / 100.0))
+        pos_row = QtWidgets.QHBoxLayout()
+        pos_row.addWidget(self.position, 1)
+        self._row(g, "位置", self._pro_teaser(pos_row, "会员版可把弹幕带放在屏幕居中或底部"))
         self.opacity = self._slider_row(g, "不透明度", 20, 100, float(conf["opacity"]) * 100, lambda v: f"{v}%")
         self.size = self._slider_row(g, "字号", 12, 80, int(conf["font_size"]), lambda v: f"{v}px")
         self.speed = self._slider_row(g, "速度", 5, 90, float(conf["speed"]) * 10, _speed_lbl)
@@ -1643,10 +1694,15 @@ class SettingsDialog(QtWidgets.QDialog):
             self._row(g, "", self._pro_teaser(cell, "此功能在会员版中提供"))
 
         # ============ 左栏:会员版功能 ============
-        g = self._card("会员版功能", self._page_layouts[4])
+        g = self._card("免费和会员差在哪", self._page_layouts[4])
         promo = QtWidgets.QLabel(
-            "关注词不限个数,支持别名与股票代码整词匹配 · 同事件合并 · "
-            "回看与收藏 · 共享屏幕时隐藏 · 全局快捷键 · 弹幕放在顶部、居中或底部<br>"
+            "<table cellspacing='0' cellpadding='4'>"
+            "<tr><td></td><td><b>免费</b></td><td><b>会员</b></td></tr>"
+            "<tr><td>能盯几只股票、几个关键词</td><td>1 个</td><td>不限,填名字或代码都认得</td></tr>"
+            "<tr><td>同一件事好几家都报</td><td>每条都放</td><td>只放一次</td></tr>"
+            "<tr><td>走开时错过了什么</td><td>暂停时才通知</td><td>每条命中都进通知栏</td></tr>"
+            "<tr><td>弹幕放哪</td><td>屏幕顶部</td><td>顶部、中间或底部</td></tr>"
+            "</table>还有回看与收藏、共享屏幕时自动隐藏、全局快捷键。<br>"
             f'<a href="{PRO_URL}">了解会员版 ↗</a>')
         promo.setWordWrap(True)
         promo.setOpenExternalLinks(True)
